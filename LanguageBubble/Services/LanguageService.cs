@@ -14,15 +14,87 @@ internal sealed class LayoutInfo
     {
         get
         {
-            // For CJK and Thai languages, show native name (shorter form)
             string twoLetter = Culture.TwoLetterISOLanguageName;
             return twoLetter switch
             {
-                "en" => "A",    // Show "EN" instead of "US" for English
-                "ja" => "\u3042",    // Hiragana 'a' - recognizable Japanese symbol
-                "zh" => "\u4e2d",    // Chinese character for 'middle/China'
-                "ko" => "\uac00",    // Korean character 'ga'
-                "th" => "\u0e01",    // Thai character 'ko kai'
+                // Latin — special case
+                "en" => "A",
+
+                // CJK
+                "ja" => "\u3042",    // あ  Hiragana 'a'
+                "zh" => "\u4e2d",    // 中  'middle/China'
+                "ko" => "\uac00",    // 가  'ga'
+
+                // Southeast Asian
+                "th" => "\u0e01",    // ก   Thai 'ko kai'
+                "km" => "\u1780",    // ក   Khmer 'ka'
+                "lo" => "\u0ea5",    // ລ   Lao 'lo'
+                "my" => "\u1000",    // က   Myanmar 'ka'
+
+                // South Asian — Devanagari
+                "hi" => "\u0905",    // अ   Devanagari 'a' (Hindi)
+                "mr" => "\u092e",    // म   Devanagari 'ma' (Marathi)
+                "ne" => "\u0928",    // न   Devanagari 'na' (Nepali)
+                "sa" => "\u0938",    // स   Devanagari 'sa' (Sanskrit)
+
+                // South Asian — other scripts
+                "bn" => "\u0985",    // অ   Bengali 'a'
+                "as" => "\u0985",    // অ   Assamese 'a' (shared Bengali script)
+                "gu" => "\u0a97",    // ગ   Gujarati 'ga'
+                "pa" => "\u0a2a",    // ਪ   Gurmukhi 'pa' (Punjabi)
+                "ta" => "\u0ba4",    // த   Tamil 'ta'
+                "te" => "\u0c24",    // త   Telugu 'ta'
+                "kn" => "\u0c95",    // ಕ   Kannada 'ka'
+                "ml" => "\u0d2e",    // മ   Malayalam 'ma'
+                "si" => "\u0dc3",    // ස   Sinhala 'sa'
+                "or" => "\u0b13",    // ଓ   Odia 'o'
+
+                // Urdu / Arabic script
+                "ur" => "\u0627",    // ا   Urdu 'alif'
+                "ar" => "\u0639",    // ع   Arabic 'ain'
+                "fa" => "\u0641",    // ف   Persian/Farsi 'fe'
+                "ps" => "\u067e",    // پ   Pashto 'pe'
+                "ug" => "\u0626",    // ئ   Uyghur 'hamza ye'
+                "sd" => "\u0633",    // س   Sindhi 'seen'
+                "ku" => "\u06a9",    // ک   Kurdish 'keheh'
+
+                // Hebrew
+                "he" => "\u05d0",    // א   Hebrew 'alef'
+                "yi" => "\u05d9",    // י   Yiddish 'yod'
+
+                // Cyrillic
+                "ru" => "\u0410",    // А   Cyrillic 'A' (Russian)
+                "uk" => "\u0423",    // У   Cyrillic 'U' (Ukrainian)
+                "bg" => "\u0411",    // Б   Cyrillic 'B' (Bulgarian)
+                "sr" => "\u0421",    // С   Cyrillic 'S' (Serbian)
+                "mk" => "\u041c",    // М   Cyrillic 'M' (Macedonian)
+                "kk" => "\u049a",    // Қ   Cyrillic 'Qa' (Kazakh)
+                "ky" => "\u041a",    // К   Cyrillic 'K' (Kyrgyz)
+                "mn" => "\u041c",    // М   Cyrillic 'M' (Mongolian)
+                "tg" => "\u0422",    // Т   Cyrillic 'T' (Tajik)
+
+                // Greek
+                "el" => "\u0391",    // Α   Greek 'Alpha'
+
+                // Caucasian
+                "ka" => "\u10d0",    // ა   Georgian 'ani'
+                "hy" => "\u0531",    // Ա   Armenian 'ayb'
+
+                // Tibetan
+                "bo" => "\u0f56",    // བ   Tibetan 'ba'
+
+                // Ethiopic
+                "am" => "\u12a0",    // አ   Amharic/Ethiopic 'a'
+                "ti" => "\u1275",    // ት   Tigrinya 'ti'
+
+                // Canadian Indigenous
+                "iu" => "\u1403",    // ᐃ   Inuktitut syllabic 'i'
+                "cr" => "\u1431",    // ᐱ   Cree syllabic 'pi'
+
+                // Cherokee
+                "chr" => "\u13e3",   // Ꮳ   Cherokee 'tsa'
+
+                // All Latin-script languages fall through (FR, DE, ES, PT, etc.)
                 _ => twoLetter.ToUpperInvariant()
             };
         }
