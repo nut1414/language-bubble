@@ -16,6 +16,7 @@ public enum BubbleSize { ExtraSmall, Small, Medium, Large, ExtraLarge }
 public partial class BubbleWindow : Window
 {
     private readonly DispatcherTimer _hideTimer;
+    private readonly DispatcherTimer _topmostTimer;
     private Storyboard? _fadeOutStoryboard;
 
     private double _itemWidth = 32;
@@ -92,6 +93,12 @@ public partial class BubbleWindow : Window
             Interval = TimeSpan.FromSeconds(1.5)
         };
         _hideTimer.Tick += OnHideTimerTick;
+
+        _topmostTimer = new DispatcherTimer
+        {
+            Interval = TimeSpan.FromMilliseconds(100)
+        };
+        _topmostTimer.Tick += OnTopmostTimerTick;
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -270,6 +277,7 @@ public partial class BubbleWindow : Window
         }
 
         _previousSelectedIndex = selectedIndex;
+        _topmostTimer.Start();
         _hideTimer.Start();
     }
 
@@ -429,8 +437,8 @@ public partial class BubbleWindow : Window
         _desiredPhysX = x;
         _desiredPhysY = y;
         _hasPendingPosition = true;
-        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
-            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
+        NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, x, y, 0, 0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
     }
 
     private void OnHideTimerTick(object? sender, EventArgs e)
@@ -439,8 +447,19 @@ public partial class BubbleWindow : Window
         _fadeOutStoryboard?.Begin(this, true);
     }
 
+    private void OnTopmostTimerTick(object? sender, EventArgs e)
+    {
+        var hwnd = new WindowInteropHelper(this).Handle;
+        if (hwnd != IntPtr.Zero)
+        {
+            NativeMethods.SetWindowPos(hwnd, NativeMethods.HWND_TOPMOST, 0, 0, 0, 0,
+                NativeMethods.SWP_NOMOVE | NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
+        }
+    }
+
     private void OnFadeOutCompleted(object? sender, EventArgs e)
     {
+        _topmostTimer.Stop();
         Hide();
 
         // Return memory to the OS — .NET GC holds committed pages by default.

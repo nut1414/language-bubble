@@ -1,0 +1,50 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        rid: [win-x64, win-arm64]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '9.0.x'
+
+      - name: Publish
+        run: dotnet publish LanguageBubble/LanguageBubble.csproj -c Release -r ${{ matrix.rid }}
+
+      - name: Rename artifact
+        run: |
+          Copy-Item "LanguageBubble/bin/Release/net9.0-windows/${{ matrix.rid }}/publish/LanguageBubble.exe" "LanguageBubble-${{ matrix.rid }}.exe"
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LanguageBubble-${{ matrix.rid }}
+          path: LanguageBubble-${{ matrix.rid }}.exe
+
+  release:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          files: artifacts/*
