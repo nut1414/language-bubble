@@ -441,6 +441,19 @@ public partial class BubbleWindow : Window
             NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOACTIVATE);
     }
 
+    internal void InstantHide()
+    {
+        if (!IsVisible)
+            return;
+
+        _hideTimer.Stop();
+        _topmostTimer.Stop();
+        _fadeOutStoryboard?.Stop(this);
+        BeginAnimation(OpacityProperty, null);
+        Opacity = 0;
+        Hide();
+    }
+
     private void OnHideTimerTick(object? sender, EventArgs e)
     {
         _hideTimer.Stop();

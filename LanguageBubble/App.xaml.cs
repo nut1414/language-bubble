@@ -49,6 +49,7 @@ public partial class App : Application
         // Install keyboard hook
         _keyboardHook = new KeyboardHook();
         _keyboardHook.CapsLockPressed += OnCapsLockPressed;
+        _keyboardHook.KeyPressed += OnKeyPressed;
         _keyboardHook.Install();
 
         // Force Caps Lock off on startup
@@ -180,6 +181,11 @@ public partial class App : Application
         var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => ExitApplication();
         _contextMenu.Items.Add(exitItem);
+    }
+
+    private void OnKeyPressed()
+    {
+        Dispatcher.InvokeAsync(() => _bubbleWindow?.InstantHide());
     }
 
     private void OnCapsLockPressed()

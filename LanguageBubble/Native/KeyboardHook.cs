@@ -12,6 +12,7 @@ internal sealed class KeyboardHook : IDisposable
     public bool SuppressSelfGenerated { get; set; }
 
     public event Action? CapsLockPressed;
+    public event Action? KeyPressed;
 
     public KeyboardHook()
     {
@@ -59,11 +60,12 @@ internal sealed class KeyboardHook : IDisposable
 
         var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
 
+        int msg = wParam.ToInt32();
+        bool isKeyDown = msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN;
+
         if (hookStruct.vkCode == NativeMethods.VK_CAPITAL)
         {
-            int msg = wParam.ToInt32();
-
-            if (msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN)
+            if (isKeyDown)
             {
                 // Only fire on key-down, not key-up repeats
                 CapsLockPressed?.Invoke();
@@ -72,6 +74,9 @@ internal sealed class KeyboardHook : IDisposable
             // Suppress both key-down and key-up to prevent Caps Lock toggle
             return (IntPtr)1;
         }
+
+        if (isKeyDown)
+            KeyPressed?.Invoke();
 
         return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
     }
