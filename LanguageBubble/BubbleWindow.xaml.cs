@@ -23,6 +23,7 @@ public partial class BubbleWindow : Window
     private int _previousSelectedIndex = -1;
     private int _layoutCount;
     private readonly List<TextBlock> _labels = new();
+    private static readonly System.Windows.Media.FontFamily s_font = new("Segoe UI Semibold");
     private int _desiredPhysX, _desiredPhysY;
     private bool _hasPendingPosition;
 
@@ -165,18 +166,18 @@ public partial class BubbleWindow : Window
                     Duration = TimeSpan.FromMilliseconds(200),
                     EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
                 };
-                RowTranslate.BeginAnimation(TranslateTransform.XProperty, slideAnim);
+                RowTranslate.BeginAnimation(TranslateTransform.XProperty, slideAnim, HandoffBehavior.Compose);
 
                 // Animate old selected label dimming
                 if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
                 {
                     var dimAnim = new DoubleAnimation(0.3, TimeSpan.FromMilliseconds(200));
-                    _labels[_previousSelectedIndex].BeginAnimation(OpacityProperty, dimAnim);
+                    _labels[_previousSelectedIndex].BeginAnimation(OpacityProperty, dimAnim, HandoffBehavior.Compose);
                 }
 
                 // Animate new selected label brightening
                 var brightAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200));
-                _labels[selectedIndex].BeginAnimation(OpacityProperty, brightAnim);
+                _labels[selectedIndex].BeginAnimation(OpacityProperty, brightAnim, HandoffBehavior.Compose);
             }
             else
             {
@@ -241,7 +242,7 @@ public partial class BubbleWindow : Window
                 Text = layout.BubbleText,
                 Foreground = System.Windows.Media.Brushes.White,
                 FontSize = _fontSize,
-                FontFamily = new System.Windows.Media.FontFamily("Segoe UI Semibold"),
+                FontFamily = s_font,
                 TextAlignment = TextAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
                 Width = _itemWidth,
