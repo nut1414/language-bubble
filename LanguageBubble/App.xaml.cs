@@ -34,17 +34,6 @@ public partial class App : Application
             return;
         }
 
-        // Create a hidden main window (needed for DPI-aware PresentationSource)
-        MainWindow = new Window
-        {
-            Width = 0,
-            Height = 0,
-            WindowStyle = WindowStyle.None,
-            ShowInTaskbar = false,
-            ShowActivated = false,
-            Visibility = Visibility.Hidden
-        };
-
         // Initialize services
         _languageService = new LanguageService();
         _languageService.RefreshLayouts();
@@ -99,6 +88,8 @@ public partial class App : Application
     {
         if (_notifyIcon == null || _languageService == null)
             return;
+
+        var oldMenu = _notifyIcon.ContextMenuStrip;
 
         var menu = new WinForms.ContextMenuStrip();
 
@@ -182,6 +173,8 @@ public partial class App : Application
         menu.Items.Add(exitItem);
 
         _notifyIcon.ContextMenuStrip = menu;
+
+        oldMenu?.Dispose();
     }
 
     private void OnCapsLockPressed()
@@ -222,9 +215,6 @@ public partial class App : Application
 
                 // Show the bubble with all languages
                 _bubbleWindow!.ShowBubble(allLayouts, selectedIndex, caretPos);
-
-                // Update tray menu
-                RebuildContextMenu();
             }
             finally
             {

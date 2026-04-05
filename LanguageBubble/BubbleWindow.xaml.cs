@@ -85,11 +85,20 @@ public partial class BubbleWindow : Window
         NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE,
             exStyle | NativeMethods.WS_EX_TRANSPARENT | NativeMethods.WS_EX_TOOLWINDOW);
 
+        // Use DWM composited transparency instead of AllowsTransparency.
+        // AllowsTransparency forces WPF software rendering (large RAM bitmaps);
+        // DWM composition uses hardware acceleration with minimal memory.
+        var source = HwndSource.FromHwnd(hwnd);
+        if (source?.CompositionTarget != null)
+            source.CompositionTarget.BackgroundColor = Colors.Transparent;
+
+        var margins = new NativeMethods.MARGINS { Left = -1, Right = -1, Top = -1, Bottom = -1 };
+        NativeMethods.DwmExtendFrameIntoClientArea(hwnd, ref margins);
+
         // Hook WndProc to intercept WM_DPICHANGED — WPF's default handler
         // repositions the window using a "suggested rect" that overrides our
         // SetWindowPos placement. We let WPF update its DPI state, then
         // immediately re-apply our desired physical position.
-        var source = HwndSource.FromHwnd(hwnd);
         source?.AddHook(WndProc);
 
         _fadeOutStoryboard = (Storyboard)FindResource("FadeOut");

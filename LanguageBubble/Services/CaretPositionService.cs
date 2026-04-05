@@ -1,7 +1,5 @@
 using System.Diagnostics;
 using System.Runtime.InteropServices;
-using System.Windows.Automation;
-using System.Windows.Automation.Text;
 using LanguageBubble.Native;
 
 namespace LanguageBubble.Services;
@@ -37,7 +35,9 @@ internal static class CaretPositionService
         }
 
         // Strategy 3: UI Automation TextPattern (Office, Edge)
-        result = TryUIAutomation();
+        // Isolated in a separate class so the heavy System.Windows.Automation
+        // assemblies are only loaded when this fallback is actually needed.
+        result = UIAutomationCaretHelper.TryGetCaret();
         if (result.HasValue)
         {
             Debug.WriteLine($"[Caret] UIAutomation: ({result.Value.X}, {result.Value.Y})");
@@ -125,53 +125,26 @@ internal static class CaretPositionService
 
             if (hr != 0 || obj == null) return null;
 
-            var acc = (IAccessibleInterop)obj;
-            acc.accLocation(out int left, out int top, out int width, out int height, 0);
+            try
+            {
+                var acc = (IAccessibleInterop)obj;
+                acc.accLocation(out int left, out int top, out int width, out int height, 0);
 
-            // Restore PerMonitorV2 — the COM call above may have changed it.
-            NativeMethods.SetThreadDpiAwarenessContext(
-                NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+                // Restore PerMonitorV2 — the COM call above may have changed it.
+                NativeMethods.SetThreadDpiAwarenessContext(
+                    NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-            if (left == 0 && top == 0 && width == 0 && height == 0)
-                return null;
+                if (left == 0 && top == 0 && width == 0 && height == 0)
+                    return null;
 
-            return new ScreenPoint { X = left, Y = top + height };
+                return new ScreenPoint { X = left, Y = top + height };
+            }
+            finally
+            {
+                Marshal.ReleaseComObject(obj);
+            }
         }
         catch { return null; }
-    }
-
-    private static ScreenPoint? TryUIAutomation()
-    {
-        try
-        {
-            var focused = AutomationElement.FocusedElement;
-            if (focused == null) return null;
-
-            if (!focused.TryGetCurrentPattern(TextPattern.Pattern, out object obj))
-                return null;
-
-            var tp = (TextPattern)obj;
-            var sel = tp.GetSelection();
-            if (sel.Length == 0) return null;
-
-            var range = sel[0];
-            var rects = range.GetBoundingRectangles();
-            if (rects.Length > 0 && !rects[0].IsEmpty && rects[0].Height > 0)
-            {
-                // UIAutomation returns screen coords (physical pixels)
-                return new ScreenPoint { X = (int)rects[0].X, Y = (int)(rects[0].Y + rects[0].Height) };
-            }
-
-            range.ExpandToEnclosingUnit(TextUnit.Character);
-            rects = range.GetBoundingRectangles();
-            if (rects.Length > 0 && !rects[0].IsEmpty && rects[0].Height > 0)
-            {
-                return new ScreenPoint { X = (int)rects[0].X, Y = (int)(rects[0].Y + rects[0].Height) };
-            }
-        }
-        catch { /* UIAutomation can throw */ }
-
-        return null;
     }
 
     [ComImport]
