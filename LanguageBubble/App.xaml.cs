@@ -16,6 +16,8 @@ public partial class App : Application
     private ContextMenu? _contextMenu;
     private bool _isSwitching;
     private bool _useMruSwitching;
+    private bool _hideOnTyping;
+    private bool _expandedMruOnly;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -36,6 +38,8 @@ public partial class App : Application
         _languageService.RefreshLayouts();
 
         _useMruSwitching = GetSavedMruSwitching();
+        _hideOnTyping = GetSavedHideOnTyping();
+        _expandedMruOnly = GetSavedExpandedMruOnly();
 
         // Seed MRU with the currently active language
         var initialLayout = _languageService.GetCurrentLayout();
@@ -45,6 +49,7 @@ public partial class App : Application
         // Create bubble window
         _bubbleWindow = new BubbleWindow();
         _bubbleWindow.SetSize(GetSavedBubbleSize());
+        _bubbleWindow.CurrentDisplayMode = GetSavedDisplayMode();
 
         // Install keyboard hook
         _keyboardHook = new KeyboardHook();
@@ -147,19 +152,46 @@ public partial class App : Application
         }
         _contextMenu.Items.Add(sizeMenu);
 
-        // Slide animation toggle
-        var slideAnimation = new MenuItem
+        // Display mode submenu
+        var modeMenu = new MenuItem { Header = "Display Mode" };
+        var currentMode = _bubbleWindow?.CurrentDisplayMode ?? DisplayMode.Carousel;
+        var modeOptions = new (string Label, DisplayMode Value)[]
         {
-            Header = "Slide Animation",
+            ("Carousel", DisplayMode.Carousel),
+            ("Simple", DisplayMode.Simple),
+            ("Show All Languages", DisplayMode.Expanded),
+        };
+        foreach (var (label, value) in modeOptions)
+        {
+            var modeItem = new MenuItem
+            {
+                Header = label,
+                IsCheckable = true,
+                IsChecked = value == currentMode
+            };
+            var captured = value;
+            modeItem.Click += (_, _) =>
+            {
+                if (_bubbleWindow != null)
+                    _bubbleWindow.CurrentDisplayMode = captured;
+                SaveDisplayMode(captured);
+            };
+            modeMenu.Items.Add(modeItem);
+        }
+        modeMenu.Items.Add(new Separator());
+        var mruOnlyItem = new MenuItem
+        {
+            Header = "Show Only Recent Languages",
             IsCheckable = true,
-            IsChecked = _bubbleWindow?.UseSlideAnimation ?? true
+            IsChecked = _expandedMruOnly
         };
-        slideAnimation.Click += (_, _) =>
+        mruOnlyItem.Click += (_, _) =>
         {
-            if (_bubbleWindow != null)
-                _bubbleWindow.UseSlideAnimation = slideAnimation.IsChecked;
+            _expandedMruOnly = mruOnlyItem.IsChecked;
+            SaveExpandedMruOnly(_expandedMruOnly);
         };
-        _contextMenu.Items.Add(slideAnimation);
+        modeMenu.Items.Add(mruOnlyItem);
+        _contextMenu.Items.Add(modeMenu);
 
         // MRU switching toggle
         var mruSwitching = new MenuItem
@@ -175,6 +207,20 @@ public partial class App : Application
         };
         _contextMenu.Items.Add(mruSwitching);
 
+        // Hide on typing toggle
+        var hideOnTyping = new MenuItem
+        {
+            Header = "Hide on Typing",
+            IsCheckable = true,
+            IsChecked = _hideOnTyping
+        };
+        hideOnTyping.Click += (_, _) =>
+        {
+            _hideOnTyping = hideOnTyping.IsChecked;
+            SaveHideOnTyping(_hideOnTyping);
+        };
+        _contextMenu.Items.Add(hideOnTyping);
+
         _contextMenu.Items.Add(new Separator());
 
         // Exit
@@ -185,7 +231,8 @@ public partial class App : Application
 
     private void OnKeyPressed()
     {
-        Dispatcher.InvokeAsync(() => _bubbleWindow?.InstantHide());
+        if (_hideOnTyping)
+            Dispatcher.InvokeAsync(() => _bubbleWindow?.InstantHide());
     }
 
     private void OnCapsLockPressed()
@@ -222,20 +269,23 @@ public partial class App : Application
                 // Get caret position (physical pixels)
                 var caretPos = CaretPositionService.GetCaretScreenPosition();
 
-                // Find selected index in layouts list
-                var allLayouts = _languageService.Layouts;
+                // Pick which layouts to show in the bubble
+                var displayLayouts = (_expandedMruOnly
+                    && _bubbleWindow!.CurrentDisplayMode == DisplayMode.Expanded)
+                    ? _languageService.GetMruLayouts()
+                    : _languageService.Layouts;
+
                 int selectedIndex = -1;
-                for (int i = 0; i < allLayouts.Count; i++)
+                for (int i = 0; i < displayLayouts.Count; i++)
                 {
-                    if (allLayouts[i].Hkl == newLayout.Hkl)
+                    if (displayLayouts[i].Hkl == newLayout.Hkl)
                     {
                         selectedIndex = i;
                         break;
                     }
                 }
 
-                // Show the bubble with all languages
-                _bubbleWindow!.ShowBubble(allLayouts, selectedIndex, caretPos);
+                _bubbleWindow!.ShowBubble(displayLayouts, selectedIndex, caretPos);
             }
             finally
             {
@@ -323,6 +373,79 @@ public partial class App : Application
             using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
                 @"Software\LanguageBubble");
             key.SetValue("MruSwitching", enabled.ToString());
+        }
+        catch { }
+    }
+
+    private static bool GetSavedHideOnTyping()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\LanguageBubble", false);
+            var value = key?.GetValue("HideOnTyping") as string;
+            return value == "True";
+        }
+        catch { }
+        return false;
+    }
+
+    private static void SaveHideOnTyping(bool enabled)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+            key.SetValue("HideOnTyping", enabled.ToString());
+        }
+        catch { }
+    }
+
+    private static DisplayMode GetSavedDisplayMode()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\LanguageBubble", false);
+            var value = key?.GetValue("DisplayMode") as string;
+            if (value != null && Enum.TryParse<DisplayMode>(value, out var mode))
+                return mode;
+        }
+        catch { }
+        return DisplayMode.Carousel;
+    }
+
+    private static void SaveDisplayMode(DisplayMode mode)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+            key.SetValue("DisplayMode", mode.ToString());
+        }
+        catch { }
+    }
+
+    private static bool GetSavedExpandedMruOnly()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\LanguageBubble", false);
+            var value = key?.GetValue("ExpandedMruOnly") as string;
+            return value == "True";
+        }
+        catch { }
+        return false;
+    }
+
+    private static void SaveExpandedMruOnly(bool enabled)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+            key.SetValue("ExpandedMruOnly", enabled.ToString());
         }
         catch { }
     }

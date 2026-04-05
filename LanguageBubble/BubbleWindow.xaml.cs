@@ -12,6 +12,7 @@ using Microsoft.Win32;
 namespace LanguageBubble;
 
 public enum BubbleSize { ExtraSmall, Small, Medium, Large, ExtraLarge }
+public enum DisplayMode { Carousel, Simple, Expanded }
 
 public partial class BubbleWindow : Window
 {
@@ -30,6 +31,12 @@ public partial class BubbleWindow : Window
     private bool _hasPendingPosition;
     private Brush _foreground = Brushes.White;
 
+    // Window slide animation state (for expanded mode)
+    private DispatcherTimer? _slideTimer;
+    private int _slideStartX, _slideTargetX;
+    private DateTime _slideStartTime;
+    private const double SlideDurationMs = 200;
+
     // Dark mode colors
     private static readonly Brush s_darkBackground = new SolidColorBrush(Color.FromArgb(0xDD, 0x2D, 0x2D, 0x2D));
     private static readonly Brush s_darkBorder = new SolidColorBrush(Color.FromArgb(0x44, 0xFF, 0xFF, 0xFF));
@@ -46,7 +53,7 @@ public partial class BubbleWindow : Window
         s_lightBorder.Freeze();
     }
 
-    public bool UseSlideAnimation { get; set; } = true;
+    public DisplayMode CurrentDisplayMode { get; set; } = DisplayMode.Carousel;
     public BubbleSize CurrentSize { get; private set; } = BubbleSize.Medium;
 
     public void SetSize(BubbleSize size)
@@ -161,6 +168,7 @@ public partial class BubbleWindow : Window
     {
         _hideTimer.Stop();
         _fadeOutStoryboard?.Stop(this);
+        _slideTimer?.Stop();
 
         // Rebuild labels if layout count changed
         if (layouts.Count != _layoutCount)
@@ -172,10 +180,78 @@ public partial class BubbleWindow : Window
         if (selectedIndex < 0 || selectedIndex >= _labels.Count)
             selectedIndex = 0;
 
-        bool shouldSlide = UseSlideAnimation && _previousSelectedIndex >= 0
+        bool canSlide = _previousSelectedIndex >= 0
             && _previousSelectedIndex != selectedIndex && _labels.Count > 1;
 
-        if (UseSlideAnimation && _labels.Count > 1)
+        if (CurrentDisplayMode == DisplayMode.Expanded && _labels.Count > 1)
+        {
+            // --- Expanded mode: all languages visible, window slides ---
+            CarouselCanvas.Visibility = Visibility.Visible;
+
+            double totalWidth = _labels.Count * _itemWidth;
+            CarouselCanvas.Width = totalWidth;
+            CarouselCanvas.Height = _itemHeight;
+            Width = totalWidth + 16 + 1;
+
+            // Row stays at origin — all items visible
+            RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+            RowTranslate.X = 0;
+
+            // Update label opacities
+            for (int i = 0; i < _labels.Count; i++)
+            {
+                _labels[i].BeginAnimation(OpacityProperty, null);
+                _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
+            }
+
+            Opacity = 0;
+            Show();
+            UpdateLayout();
+
+            if (caretPhysical.HasValue)
+                PositionAtCaretExpanded(caretPhysical.Value, selectedIndex);
+            else
+                CenterOnScreen();
+
+            if (canSlide)
+            {
+                Opacity = 1;
+
+                // Compute offset between old and new selected item positions
+                int indexDelta = selectedIndex - _previousSelectedIndex;
+                var hwnd = new WindowInteropHelper(this).Handle;
+                NativeMethods.GetWindowRect(hwnd, out var rect);
+                int physW = rect.Right - rect.Left;
+                double dpiScale = physW / Width;
+                int offsetPhys = (int)(indexDelta * _itemWidth * dpiScale);
+
+                // Save target before SetPhysicalPosition overwrites _desiredPhysX
+                int targetX = _desiredPhysX;
+                int startX = targetX + offsetPhys;
+
+                // Move window to old position, then animate to target
+                SetPhysicalPosition(hwnd, startX, _desiredPhysY);
+                AnimateWindowSlide(startX, targetX);
+
+                // Animate label opacities
+                if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
+                {
+                    var dimAnim = new DoubleAnimation(0.3, TimeSpan.FromMilliseconds(200));
+                    _labels[_previousSelectedIndex].BeginAnimation(OpacityProperty, dimAnim, HandoffBehavior.Compose);
+                }
+                var brightAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200));
+                _labels[selectedIndex].BeginAnimation(OpacityProperty, brightAnim, HandoffBehavior.Compose);
+            }
+            else
+            {
+                var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
+                {
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                BeginAnimation(OpacityProperty, fadeIn);
+            }
+        }
+        else if (CurrentDisplayMode == DisplayMode.Carousel && _labels.Count > 1)
         {
             // --- Carousel mode ---
             CarouselCanvas.Visibility = Visibility.Visible;
@@ -183,7 +259,7 @@ public partial class BubbleWindow : Window
             // Size the canvas to show one item width
             CarouselCanvas.Width = _itemWidth;
             CarouselCanvas.Height = _itemHeight;
-            Width = _itemWidth + 16 + 1; // 16 = padding (8*2), 1 = border
+            Width = _itemWidth + 16 + 1;
 
             // Show window first so we can animate
             Opacity = 0;
@@ -204,7 +280,7 @@ public partial class BubbleWindow : Window
 
             double targetX = -selectedIndex * _itemWidth;
 
-            if (shouldSlide)
+            if (canSlide)
             {
                 // Already visible — just slide
                 Opacity = 1;
@@ -396,6 +472,81 @@ public partial class BubbleWindow : Window
             $"[Bubble] Final position=({x},{y}) Monitor=({mi.rcWork.Left},{mi.rcWork.Top})-({mi.rcWork.Right},{mi.rcWork.Bottom})");
 
         SetPhysicalPosition(bubbleHwnd, x, y);
+    }
+
+    private void PositionAtCaretExpanded(CaretPositionService.ScreenPoint physicalPt, int selectedIndex)
+    {
+        NativeMethods.SetThreadDpiAwarenessContext(
+            NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+        var bubbleHwnd = new WindowInteropHelper(this).Handle;
+
+        NativeMethods.GetWindowRect(bubbleHwnd, out NativeMethods.RECT bubbleRect);
+        int bubbleW = bubbleRect.Right - bubbleRect.Left;
+        int bubbleH = bubbleRect.Bottom - bubbleRect.Top;
+
+        // DPI scale: physical pixels per WPF DIP
+        double dpiScale = bubbleW / Width;
+
+        // Compute physical offset from window left edge to selected item center
+        double paddingLeft = OuterBorder.Padding.Left;
+        double selectedCenterDip = paddingLeft + selectedIndex * _itemWidth + _itemWidth / 2.0;
+        int selectedCenterPhys = (int)(selectedCenterDip * dpiScale);
+
+        // Position so selected item center is under the caret
+        int x = physicalPt.X - selectedCenterPhys;
+        int y = physicalPt.Y + 4;
+
+        // Monitor clamping
+        var caretPt = new NativeMethods.POINT { X = physicalPt.X, Y = physicalPt.Y };
+        IntPtr hMonitor = NativeMethods.MonitorFromPoint(
+            caretPt, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        var mi = new NativeMethods.MONITORINFO();
+        mi.cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>();
+        NativeMethods.GetMonitorInfo(hMonitor, ref mi);
+
+        const int margin = 10;
+        if (x + bubbleW > mi.rcWork.Right - margin)
+            x = mi.rcWork.Right - bubbleW - margin;
+        if (x < mi.rcWork.Left + margin)
+            x = mi.rcWork.Left + margin;
+        if (y + bubbleH > mi.rcWork.Bottom - margin)
+            y = physicalPt.Y - bubbleH - 4;
+        if (y < mi.rcWork.Top + margin)
+            y = mi.rcWork.Top + margin;
+
+        SetPhysicalPosition(bubbleHwnd, x, y);
+    }
+
+    private void AnimateWindowSlide(int fromX, int toX)
+    {
+        _slideStartX = fromX;
+        _slideTargetX = toX;
+        _slideStartTime = DateTime.UtcNow;
+
+        if (_slideTimer == null)
+        {
+            _slideTimer = new DispatcherTimer(DispatcherPriority.Send) { Interval = TimeSpan.FromMilliseconds(8) };
+            _slideTimer.Tick += OnSlideTimerTick;
+        }
+        _slideTimer.Start();
+    }
+
+    private void OnSlideTimerTick(object? sender, EventArgs e)
+    {
+        double elapsed = (DateTime.UtcNow - _slideStartTime).TotalMilliseconds;
+        double t = Math.Min(elapsed / SlideDurationMs, 1.0);
+
+        // Cubic ease-out
+        double eased = 1 - Math.Pow(1 - t, 3);
+
+        int x = _slideStartX + (int)((_slideTargetX - _slideStartX) * eased);
+
+        var hwnd = new WindowInteropHelper(this).Handle;
+        SetPhysicalPosition(hwnd, x, _desiredPhysY);
+
+        if (t >= 1.0)
+            _slideTimer!.Stop();
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)

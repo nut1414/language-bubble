@@ -150,6 +150,24 @@ internal sealed class LanguageService
         return SwitchToNextLayout();
     }
 
+    public IReadOnlyList<LayoutInfo> GetMruLayouts()
+    {
+        var result = new List<LayoutInfo>();
+        var english = _layouts.FirstOrDefault(l => l.Culture.TwoLetterISOLanguageName == "en");
+        if (english != null)
+            result.Add(english);
+
+        LayoutInfo? nonEnglish = null;
+        if (_lastNonEnglishHkl != IntPtr.Zero)
+            nonEnglish = _layouts.FirstOrDefault(l => l.Hkl == _lastNonEnglishHkl);
+        nonEnglish ??= _layouts.FirstOrDefault(l => l.Culture.TwoLetterISOLanguageName != "en");
+
+        if (nonEnglish != null)
+            result.Add(nonEnglish);
+
+        return result.Count > 0 ? result : _layouts;
+    }
+
     private void ActivateLayout(LayoutInfo target)
     {
         IntPtr hwnd = NativeMethods.GetForegroundWindow();
