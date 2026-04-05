@@ -14,6 +14,7 @@ public partial class App : Application
     private LanguageService? _languageService;
     private BubbleWindow? _bubbleWindow;
     private NativeTrayIcon? _trayIcon;
+    private string? _tempIconPath;
     private ContextMenu? _contextMenu;
     private bool _isSwitching;
     private HookKeyCombo? _pendingCombo;
@@ -77,11 +78,17 @@ public partial class App : Application
 
     private void SetupTrayIcon()
     {
-        var iconPath = System.IO.Path.Combine(
-            AppDomain.CurrentDomain.BaseDirectory, "Resources", "app.ico");
+        var assembly = System.Reflection.Assembly.GetExecutingAssembly();
+        using var stream = assembly.GetManifestResourceStream("LanguageBubble.Resources.app.ico");
+        if (stream != null)
+        {
+            _tempIconPath = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "LanguageBubble_app.ico");
+            using var fs = System.IO.File.Create(_tempIconPath);
+            stream.CopyTo(fs);
+        }
 
         _trayIcon = new NativeTrayIcon();
-        _trayIcon.Create("Language Bubble", iconPath);
+        _trayIcon.Create("Language Bubble", _tempIconPath);
         _trayIcon.RightClick += OnTrayRightClick;
     }
 
@@ -394,6 +401,9 @@ public partial class App : Application
     {
         _keyboardHook?.Dispose();
         _trayIcon?.Dispose();
+
+        if (_tempIconPath != null)
+            try { System.IO.File.Delete(_tempIconPath); } catch { }
 
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
