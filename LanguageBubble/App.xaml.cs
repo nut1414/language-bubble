@@ -134,6 +134,19 @@ public partial class App : Application
         };
         menu.Items.Add(startWithWindows);
 
+        // Slide animation toggle
+        var slideAnimation = new WinForms.ToolStripMenuItem("Slide Animation");
+        slideAnimation.Checked = _bubbleWindow?.UseSlideAnimation ?? true;
+        slideAnimation.Click += (_, _) =>
+        {
+            if (_bubbleWindow != null)
+            {
+                _bubbleWindow.UseSlideAnimation = !_bubbleWindow.UseSlideAnimation;
+                slideAnimation.Checked = _bubbleWindow.UseSlideAnimation;
+            }
+        };
+        menu.Items.Add(slideAnimation);
+
         menu.Items.Add(new WinForms.ToolStripSeparator());
 
         // Exit
@@ -168,8 +181,20 @@ public partial class App : Application
                 // Get caret position (physical pixels)
                 var caretPos = CaretPositionService.GetCaretScreenPosition();
 
-                // Show the bubble
-                _bubbleWindow!.ShowBubble(newLayout.BubbleText, caretPos);
+                // Find selected index in layouts list
+                var allLayouts = _languageService.Layouts;
+                int selectedIndex = -1;
+                for (int i = 0; i < allLayouts.Count; i++)
+                {
+                    if (allLayouts[i].Hkl == newLayout.Hkl)
+                    {
+                        selectedIndex = i;
+                        break;
+                    }
+                }
+
+                // Show the bubble with all languages
+                _bubbleWindow!.ShowBubble(allLayouts, selectedIndex, caretPos);
 
                 // Update tray menu
                 RebuildContextMenu();

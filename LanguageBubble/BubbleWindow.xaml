@@ -8,19 +8,11 @@
         ShowInTaskbar="False"
         ShowActivated="False"
         ResizeMode="NoResize"
-        SizeToContent="WidthAndHeight"
+        SizeToContent="Height"
         Opacity="0">
 
     <Window.Resources>
-        <Storyboard x:Key="FadeIn">
-            <DoubleAnimation Storyboard.TargetProperty="Opacity"
-                             From="0" To="1" Duration="0:0:0.15">
-                <DoubleAnimation.EasingFunction>
-                    <CubicEase EasingMode="EaseOut"/>
-                </DoubleAnimation.EasingFunction>
-            </DoubleAnimation>
-        </Storyboard>
-
+        <!-- Fade out (auto-hide) -->
         <Storyboard x:Key="FadeOut">
             <DoubleAnimation Storyboard.TargetProperty="Opacity"
                              From="1" To="0" Duration="0:0:0.3">
@@ -35,17 +27,23 @@
             Padding="14,6"
             Background="#DD2D2D2D"
             BorderBrush="#44FFFFFF"
-            BorderThickness="0.5">
+            BorderThickness="0.5"
+            ClipToBounds="True">
         <Border.Effect>
             <DropShadowEffect BlurRadius="15" Opacity="0.4" ShadowDepth="2" Color="Black"/>
         </Border.Effect>
 
-        <TextBlock x:Name="LanguageLabel"
-                   Foreground="White"
-                   FontSize="18"
-                   FontFamily="Segoe UI Semibold"
-                   TextAlignment="Center"
-                   VerticalAlignment="Center"
-                   Text="EN"/>
+        <!-- Carousel: clipped area showing the language row -->
+        <Canvas x:Name="CarouselCanvas" ClipToBounds="True">
+            <StackPanel x:Name="LanguageRow" Orientation="Horizontal"
+                        Canvas.Top="0" Canvas.Left="0">
+                <StackPanel.RenderTransform>
+                    <TranslateTransform x:Name="RowTranslate" X="0"/>
+                </StackPanel.RenderTransform>
+            </StackPanel>
+        </Canvas>
+
+        <!-- Fallback: single label for non-slide mode -->
+        <!-- (managed in code-behind by toggling visibility) -->
     </Border>
 </Window>
