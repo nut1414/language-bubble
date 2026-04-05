@@ -16,6 +16,7 @@ public partial class App : Application
     private NativeTrayIcon? _trayIcon;
     private ContextMenu? _contextMenu;
     private bool _isSwitching;
+    private HookKeyCombo? _pendingCombo;
     private SwitchMode _capsLockMode;
     private SwitchMode _winSpaceMode;
     private SwitchMode _altShiftMode;
@@ -283,12 +284,19 @@ public partial class App : Application
 
     private void OnSwitchKeyPressed(HookKeyCombo combo)
     {
-        // Debounce: ignore if already switching
         if (_isSwitching)
+        {
+            // Queue the latest press instead of dropping it
+            _pendingCombo = combo;
             return;
+        }
 
         _isSwitching = true;
+        ProcessSwitch(combo);
+    }
 
+    private void ProcessSwitch(HookKeyCombo combo)
+    {
         // Dispatch async to avoid blocking the hook callback
         Dispatcher.InvokeAsync(() =>
         {
@@ -357,7 +365,16 @@ public partial class App : Application
             }
             finally
             {
-                _isSwitching = false;
+                var pending = _pendingCombo;
+                _pendingCombo = null;
+                if (pending.HasValue)
+                {
+                    ProcessSwitch(pending.Value);
+                }
+                else
+                {
+                    _isSwitching = false;
+                }
             }
         });
     }

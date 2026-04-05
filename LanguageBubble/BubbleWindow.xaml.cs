@@ -35,6 +35,8 @@ public partial class BubbleWindow : Window
     private DispatcherTimer? _slideTimer;
     private int _slideStartX, _slideTargetX;
     private DateTime _slideStartTime;
+    private int _slideCurrentX;
+    private bool _slideInProgress;
     private const double SlideDurationMs = 200;
 
     // Dark mode colors
@@ -217,30 +219,49 @@ public partial class BubbleWindow : Window
             {
                 Opacity = 1;
 
-                // Compute offset between old and new selected item positions
-                int indexDelta = selectedIndex - _previousSelectedIndex;
-                var hwnd = new WindowInteropHelper(this).Handle;
-                NativeMethods.GetWindowRect(hwnd, out var rect);
-                int physW = rect.Right - rect.Left;
-                double dpiScale = physW / Width;
-                int offsetPhys = (int)(indexDelta * _itemWidth * dpiScale);
-
-                // Save target before SetPhysicalPosition overwrites _desiredPhysX
                 int targetX = _desiredPhysX;
-                int startX = targetX + offsetPhys;
+                int startX;
 
-                // Move window to old position, then animate to target
+                if (_slideInProgress)
+                {
+                    // Slide was interrupted — start from actual current position
+                    startX = _slideCurrentX;
+                }
+                else
+                {
+                    // No slide in progress — compute from index delta
+                    int indexDelta = selectedIndex - _previousSelectedIndex;
+                    var hwnd2 = new WindowInteropHelper(this).Handle;
+                    NativeMethods.GetWindowRect(hwnd2, out var rect);
+                    int physW = rect.Right - rect.Left;
+                    double dpiScale = physW / Width;
+                    int offsetPhys = (int)(indexDelta * _itemWidth * dpiScale);
+                    startX = targetX + offsetPhys;
+                }
+
+                // Move window to start position, then animate to target
+                var hwnd = new WindowInteropHelper(this).Handle;
                 SetPhysicalPosition(hwnd, startX, _desiredPhysY);
                 AnimateWindowSlide(startX, targetX);
 
                 // Animate label opacities
                 if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
                 {
-                    var dimAnim = new DoubleAnimation(0.3, TimeSpan.FromMilliseconds(200));
-                    _labels[_previousSelectedIndex].BeginAnimation(OpacityProperty, dimAnim, HandoffBehavior.Compose);
+                    var prevLabel = _labels[_previousSelectedIndex];
+                    double curOp = prevLabel.Opacity;
+                    prevLabel.BeginAnimation(OpacityProperty, null);
+                    prevLabel.Opacity = curOp;
+                    prevLabel.BeginAnimation(OpacityProperty,
+                        new DoubleAnimation(curOp, 0.3, TimeSpan.FromMilliseconds(200)));
                 }
-                var brightAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200));
-                _labels[selectedIndex].BeginAnimation(OpacityProperty, brightAnim, HandoffBehavior.Compose);
+                {
+                    var newLabel = _labels[selectedIndex];
+                    double curOp = newLabel.Opacity;
+                    newLabel.BeginAnimation(OpacityProperty, null);
+                    newLabel.Opacity = curOp;
+                    newLabel.BeginAnimation(OpacityProperty,
+                        new DoubleAnimation(curOp, 1.0, TimeSpan.FromMilliseconds(200)));
+                }
             }
             else
             {
@@ -285,25 +306,39 @@ public partial class BubbleWindow : Window
                 // Already visible — just slide
                 Opacity = 1;
 
-                // Animate the row position
+                // Animate the row position from current to target
+                double currentX = RowTranslate.X;
+                RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+                RowTranslate.X = currentX;
                 var slideAnim = new DoubleAnimation
                 {
+                    From = currentX,
                     To = targetX,
                     Duration = TimeSpan.FromMilliseconds(200),
                     EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
                 };
-                RowTranslate.BeginAnimation(TranslateTransform.XProperty, slideAnim, HandoffBehavior.Compose);
+                RowTranslate.BeginAnimation(TranslateTransform.XProperty, slideAnim);
 
                 // Animate old selected label dimming
                 if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
                 {
-                    var dimAnim = new DoubleAnimation(0.3, TimeSpan.FromMilliseconds(200));
-                    _labels[_previousSelectedIndex].BeginAnimation(OpacityProperty, dimAnim, HandoffBehavior.Compose);
+                    var prevLabel = _labels[_previousSelectedIndex];
+                    double curOp = prevLabel.Opacity;
+                    prevLabel.BeginAnimation(OpacityProperty, null);
+                    prevLabel.Opacity = curOp;
+                    prevLabel.BeginAnimation(OpacityProperty,
+                        new DoubleAnimation(curOp, 0.3, TimeSpan.FromMilliseconds(200)));
                 }
 
                 // Animate new selected label brightening
-                var brightAnim = new DoubleAnimation(1.0, TimeSpan.FromMilliseconds(200));
-                _labels[selectedIndex].BeginAnimation(OpacityProperty, brightAnim, HandoffBehavior.Compose);
+                {
+                    var newLabel = _labels[selectedIndex];
+                    double curOp = newLabel.Opacity;
+                    newLabel.BeginAnimation(OpacityProperty, null);
+                    newLabel.Opacity = curOp;
+                    newLabel.BeginAnimation(OpacityProperty,
+                        new DoubleAnimation(curOp, 1.0, TimeSpan.FromMilliseconds(200)));
+                }
             }
             else
             {
@@ -520,6 +555,8 @@ public partial class BubbleWindow : Window
 
     private void AnimateWindowSlide(int fromX, int toX)
     {
+        _slideInProgress = true;
+        _slideCurrentX = fromX;
         _slideStartX = fromX;
         _slideTargetX = toX;
         _slideStartTime = DateTime.UtcNow;
@@ -541,12 +578,16 @@ public partial class BubbleWindow : Window
         double eased = 1 - Math.Pow(1 - t, 3);
 
         int x = _slideStartX + (int)((_slideTargetX - _slideStartX) * eased);
+        _slideCurrentX = x;
 
         var hwnd = new WindowInteropHelper(this).Handle;
         SetPhysicalPosition(hwnd, x, _desiredPhysY);
 
         if (t >= 1.0)
+        {
+            _slideInProgress = false;
             _slideTimer!.Stop();
+        }
     }
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
