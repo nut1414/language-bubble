@@ -11,6 +11,13 @@ internal static class NativeMethods
     public const int WM_SYSKEYDOWN = 0x0104;
     public const int WM_SYSKEYUP = 0x0105;
     public const int VK_CAPITAL = 0x14;
+    public const int VK_SPACE = 0x20;
+    public const int VK_SHIFT = 0x10;
+    public const int VK_MENU = 0x12;
+    public const int VK_LWIN = 0x5B;
+    public const int VK_RWIN = 0x5C;
+    public const int VK_RSHIFT = 0xA1;
+    public const int VK_RMENU = 0xA5;
 
     public delegate IntPtr LowLevelKeyboardProc(int nCode, IntPtr wParam, IntPtr lParam);
 

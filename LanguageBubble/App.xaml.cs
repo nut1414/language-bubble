@@ -1,5 +1,6 @@
 using System.Windows;
 using System.Windows.Controls;
+using LanguageBubble.Models;
 using LanguageBubble.Native;
 using LanguageBubble.Services;
 using Application = System.Windows.Application;
@@ -15,7 +16,9 @@ public partial class App : Application
     private NativeTrayIcon? _trayIcon;
     private ContextMenu? _contextMenu;
     private bool _isSwitching;
-    private bool _useMruSwitching;
+    private SwitchMode _capsLockMode;
+    private SwitchMode _winSpaceMode;
+    private SwitchMode _altShiftMode;
     private bool _hideOnTyping;
     private bool _expandedMruOnly;
 
@@ -37,7 +40,10 @@ public partial class App : Application
         _languageService = new LanguageService();
         _languageService.RefreshLayouts();
 
-        _useMruSwitching = GetSavedMruSwitching();
+        MigrateOldSettings();
+        _capsLockMode = GetSavedKeyMode("CapsLockMode", SwitchMode.AllLanguage);
+        _winSpaceMode = GetSavedKeyMode("WinSpaceMode", SwitchMode.Unused);
+        _altShiftMode = GetSavedKeyMode("AltShiftMode", SwitchMode.Unused);
         _hideOnTyping = GetSavedHideOnTyping();
         _expandedMruOnly = GetSavedExpandedMruOnly();
 
@@ -53,12 +59,16 @@ public partial class App : Application
 
         // Install keyboard hook
         _keyboardHook = new KeyboardHook();
-        _keyboardHook.CapsLockPressed += OnCapsLockPressed;
+        _keyboardHook.CapsLockMode = _capsLockMode;
+        _keyboardHook.WinSpaceMode = _winSpaceMode;
+        _keyboardHook.AltShiftMode = _altShiftMode;
+        _keyboardHook.SwitchKeyPressed += OnSwitchKeyPressed;
         _keyboardHook.KeyPressed += OnKeyPressed;
         _keyboardHook.Install();
 
-        // Force Caps Lock off on startup
-        CapsLockService.EnsureCapsLockOff(_keyboardHook);
+        // Force Caps Lock off on startup (only if we intercept CapsLock)
+        if (_capsLockMode != SwitchMode.Unused)
+            CapsLockService.EnsureCapsLockOff(_keyboardHook);
 
         // Setup system tray
         SetupTrayIcon();
@@ -193,19 +203,55 @@ public partial class App : Application
         modeMenu.Items.Add(mruOnlyItem);
         _contextMenu.Items.Add(modeMenu);
 
-        // MRU switching toggle
-        var mruSwitching = new MenuItem
+        // Key Bindings submenu
+        var keyBindingsMenu = new MenuItem { Header = "Key Bindings" };
+        var keyConfigs = new (string Label, SwitchMode Current, Action<SwitchMode> OnChange)[]
         {
-            Header = "Switch Between Recent and English",
-            IsCheckable = true,
-            IsChecked = _useMruSwitching
+            ("CapsLock", _capsLockMode, mode =>
+            {
+                _capsLockMode = mode;
+                _keyboardHook!.CapsLockMode = mode;
+                SaveKeyMode("CapsLockMode", mode);
+                if (mode != SwitchMode.Unused)
+                    CapsLockService.EnsureCapsLockOff(_keyboardHook);
+            }),
+            ("Win + Space", _winSpaceMode, mode =>
+            {
+                _winSpaceMode = mode;
+                _keyboardHook!.WinSpaceMode = mode;
+                SaveKeyMode("WinSpaceMode", mode);
+            }),
+            ("Alt + Shift", _altShiftMode, mode =>
+            {
+                _altShiftMode = mode;
+                _keyboardHook!.AltShiftMode = mode;
+                SaveKeyMode("AltShiftMode", mode);
+            }),
         };
-        mruSwitching.Click += (_, _) =>
+        var modeLabels = new (string Label, SwitchMode Value)[]
         {
-            _useMruSwitching = mruSwitching.IsChecked;
-            SaveMruSwitching(_useMruSwitching);
+            ("Cycle All Languages", SwitchMode.AllLanguage),
+            ("Recent and English", SwitchMode.MRU),
+            ("Do Not Intercept", SwitchMode.Unused),
         };
-        _contextMenu.Items.Add(mruSwitching);
+        foreach (var (keyLabel, activeMode, onChange) in keyConfigs)
+        {
+            var keyMenu = new MenuItem { Header = keyLabel };
+            foreach (var (modeLabel, modeValue) in modeLabels)
+            {
+                var item = new MenuItem
+                {
+                    Header = modeLabel,
+                    IsCheckable = true,
+                    IsChecked = modeValue == activeMode
+                };
+                var capturedMode = modeValue;
+                item.Click += (_, _) => onChange(capturedMode);
+                keyMenu.Items.Add(item);
+            }
+            keyBindingsMenu.Items.Add(keyMenu);
+        }
+        _contextMenu.Items.Add(keyBindingsMenu);
 
         // Hide on typing toggle
         var hideOnTyping = new MenuItem
@@ -235,7 +281,7 @@ public partial class App : Application
             Dispatcher.InvokeAsync(() => _bubbleWindow?.InstantHide());
     }
 
-    private void OnCapsLockPressed()
+    private void OnSwitchKeyPressed(HookKeyCombo combo)
     {
         // Debounce: ignore if already switching
         if (_isSwitching)
@@ -248,17 +294,29 @@ public partial class App : Application
         {
             try
             {
-                // Ensure Caps Lock stays off
-                CapsLockService.EnsureCapsLockOff(_keyboardHook!);
+                // Look up the mode for this combo
+                var mode = combo switch
+                {
+                    HookKeyCombo.CapsLock => _capsLockMode,
+                    HookKeyCombo.WinSpace => _winSpaceMode,
+                    HookKeyCombo.AltShift => _altShiftMode,
+                    _ => SwitchMode.Unused
+                };
+                if (mode == SwitchMode.Unused)
+                    return;
+
+                // Ensure Caps Lock stays off when CapsLock is the trigger
+                if (combo == HookKeyCombo.CapsLock)
+                    CapsLockService.EnsureCapsLockOff(_keyboardHook!);
 
                 // Record the current layout before switching so external
-                // changes (Win+Space, taskbar) are captured in MRU history
+                // changes are captured in MRU history
                 var beforeSwitch = _languageService!.GetCurrentLayout();
                 if (beforeSwitch != null)
                     _languageService.RecordLayoutUsage(beforeSwitch.Hkl);
 
-                // Switch language
-                var newLayout = _useMruSwitching
+                // Switch language based on the key's mode
+                var newLayout = mode == SwitchMode.MRU
                     ? _languageService!.SwitchToMruLayout()
                     : _languageService!.SwitchToNextLayout();
                 if (newLayout == null)
@@ -270,10 +328,20 @@ public partial class App : Application
                 var caretPos = CaretPositionService.GetCaretScreenPosition();
 
                 // Pick which layouts to show in the bubble
-                var displayLayouts = (_expandedMruOnly
-                    && _bubbleWindow!.CurrentDisplayMode == DisplayMode.Expanded)
-                    ? _languageService.GetMruLayouts()
-                    : _languageService.Layouts;
+                IReadOnlyList<LayoutInfo> displayLayouts;
+                if (mode == SwitchMode.AllLanguage)
+                {
+                    // AllLanguage trigger: always show all languages
+                    displayLayouts = _languageService.Layouts;
+                }
+                else
+                {
+                    // MRU trigger: respect the "show only recent" setting
+                    displayLayouts = (_expandedMruOnly
+                        && _bubbleWindow!.CurrentDisplayMode == DisplayMode.Expanded)
+                        ? _languageService.GetMruLayouts()
+                        : _languageService.Layouts;
+                }
 
                 int selectedIndex = -1;
                 for (int i = 0; i < displayLayouts.Count; i++)
@@ -353,26 +421,46 @@ public partial class App : Application
         catch { }
     }
 
-    private static bool GetSavedMruSwitching()
+    private static SwitchMode GetSavedKeyMode(string keyName, SwitchMode defaultMode)
     {
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
                 @"Software\LanguageBubble", false);
-            var value = key?.GetValue("MruSwitching") as string;
-            return value == "True";
+            var value = key?.GetValue(keyName) as string;
+            if (value != null && Enum.TryParse<SwitchMode>(value, out var mode))
+                return mode;
         }
         catch { }
-        return false;
+        return defaultMode;
     }
 
-    private static void SaveMruSwitching(bool enabled)
+    private static void SaveKeyMode(string keyName, SwitchMode mode)
     {
         try
         {
             using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
                 @"Software\LanguageBubble");
-            key.SetValue("MruSwitching", enabled.ToString());
+            key.SetValue(keyName, mode.ToString());
+        }
+        catch { }
+    }
+
+    private static void MigrateOldSettings()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+
+            // Already migrated?
+            if (key.GetValue("CapsLockMode") != null)
+                return;
+
+            var oldMru = key.GetValue("MruSwitching") as string;
+            var capsMode = oldMru == "True" ? SwitchMode.MRU : SwitchMode.AllLanguage;
+            key.SetValue("CapsLockMode", capsMode.ToString());
+            key.DeleteValue("MruSwitching", false);
         }
         catch { }
     }
