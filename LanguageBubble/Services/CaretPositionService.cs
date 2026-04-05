@@ -71,8 +71,29 @@ internal static class CaretPositionService
             if (w <= 0 && h <= 0) return null;
 
             var pt = new NativeMethods.POINT { X = gui.rcCaret.Left, Y = gui.rcCaret.Bottom };
-            if (!NativeMethods.ClientToScreen(gui.hwndCaret, ref pt))
-                return null;
+            Debug.WriteLine($"[Caret] GUIThreadInfo client=({pt.X},{pt.Y}) hwndCaret={gui.hwndCaret}");
+
+            // Temporarily match the target window's DPI awareness so ClientToScreen
+            // converts correctly across DPI awareness boundaries (e.g., our PerMonitorV2
+            // thread calling into a DPI-unaware window on a 150% monitor).
+            IntPtr targetCtx = NativeMethods.GetWindowDpiAwarenessContext(gui.hwndCaret);
+            IntPtr prevCtx = NativeMethods.SetThreadDpiAwarenessContext(targetCtx);
+            try
+            {
+                if (!NativeMethods.ClientToScreen(gui.hwndCaret, ref pt))
+                    return null;
+            }
+            finally
+            {
+                NativeMethods.SetThreadDpiAwarenessContext(prevCtx);
+            }
+            Debug.WriteLine($"[Caret] After ClientToScreen (matched DPI ctx): ({pt.X},{pt.Y})");
+
+            // Convert from the target window's screen coordinate space to physical pixels.
+            // No-op for PerMonitorV2 targets (already physical), correctly scales for
+            // DPI-unaware targets.
+            NativeMethods.LogicalToPhysicalPointForPerMonitorDPI(gui.hwndCaret, ref pt);
+            Debug.WriteLine($"[Caret] After LogicalToPhysical: ({pt.X},{pt.Y})");
 
             return new ScreenPoint { X = pt.X, Y = pt.Y };
         }
@@ -83,6 +104,11 @@ internal static class CaretPositionService
     {
         try
         {
+            // Force PerMonitorV2 context before COM calls — COM marshaling
+            // can change the thread's DPI awareness as a side effect.
+            NativeMethods.SetThreadDpiAwarenessContext(
+                NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
             IntPtr hwnd = NativeMethods.GetForegroundWindow();
             if (hwnd == IntPtr.Zero) return null;
 
@@ -101,6 +127,10 @@ internal static class CaretPositionService
 
             var acc = (IAccessibleInterop)obj;
             acc.accLocation(out int left, out int top, out int width, out int height, 0);
+
+            // Restore PerMonitorV2 — the COM call above may have changed it.
+            NativeMethods.SetThreadDpiAwarenessContext(
+                NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
             if (left == 0 && top == 0 && width == 0 && height == 0)
                 return null;

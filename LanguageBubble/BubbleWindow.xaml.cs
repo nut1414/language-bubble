@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Interop;
@@ -19,6 +20,8 @@ public partial class BubbleWindow : Window
     private int _previousSelectedIndex = -1;
     private int _layoutCount;
     private readonly List<TextBlock> _labels = new();
+    private int _desiredPhysX, _desiredPhysY;
+    private bool _hasPendingPosition;
 
     public bool UseSlideAnimation { get; set; } = true;
 
@@ -42,6 +45,13 @@ public partial class BubbleWindow : Window
 
         NativeMethods.SetWindowLong(hwnd, NativeMethods.GWL_EXSTYLE,
             exStyle | NativeMethods.WS_EX_TRANSPARENT | NativeMethods.WS_EX_TOOLWINDOW);
+
+        // Hook WndProc to intercept WM_DPICHANGED — WPF's default handler
+        // repositions the window using a "suggested rect" that overrides our
+        // SetWindowPos placement. We let WPF update its DPI state, then
+        // immediately re-apply our desired physical position.
+        var source = HwndSource.FromHwnd(hwnd);
+        source?.AddHook(WndProc);
 
         _fadeOutStoryboard = (Storyboard)FindResource("FadeOut");
         _fadeOutStoryboard.Completed += OnFadeOutCompleted;
@@ -201,38 +211,126 @@ public partial class BubbleWindow : Window
 
     private void CenterOnScreen()
     {
-        Left = (SystemParameters.PrimaryScreenWidth - ActualWidth) / 2;
-        Top = (SystemParameters.PrimaryScreenHeight - ActualHeight) / 2;
+        // Ensure PerMonitorV2 — COM calls in MSAA caret detection can corrupt
+        // the thread's DPI awareness, causing wrong coordinate spaces.
+        NativeMethods.SetThreadDpiAwarenessContext(
+            NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+
+        var bubbleHwnd = new WindowInteropHelper(this).Handle;
+
+        // Get bubble size in physical pixels
+        NativeMethods.GetWindowRect(bubbleHwnd, out NativeMethods.RECT bubbleRect);
+        int bubbleW = bubbleRect.Right - bubbleRect.Left;
+        int bubbleH = bubbleRect.Bottom - bubbleRect.Top;
+
+        // Find the monitor the user is working on
+        IntPtr fgHwnd = NativeMethods.GetForegroundWindow();
+        IntPtr hMonitor;
+
+        if (fgHwnd != IntPtr.Zero)
+        {
+            hMonitor = NativeMethods.MonitorFromWindow(
+                fgHwnd, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        }
+        else
+        {
+            NativeMethods.GetCursorPos(out NativeMethods.POINT cursorPt);
+            hMonitor = NativeMethods.MonitorFromPoint(
+                cursorPt, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        }
+
+        var mi = new NativeMethods.MONITORINFO();
+        mi.cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>();
+        NativeMethods.GetMonitorInfo(hMonitor, ref mi);
+
+        // Center within work area — all in physical pixels
+        int workW = mi.rcWork.Right - mi.rcWork.Left;
+        int workH = mi.rcWork.Bottom - mi.rcWork.Top;
+        int x = mi.rcWork.Left + (workW - bubbleW) / 2;
+        int y = mi.rcWork.Top + (workH - bubbleH) / 2;
+
+        SetPhysicalPosition(bubbleHwnd, x, y);
     }
 
     private void PositionAtCaret(CaretPositionService.ScreenPoint physicalPt)
     {
-        double dipX = physicalPt.X;
-        double dipY = physicalPt.Y;
+        // Ensure PerMonitorV2 — COM calls in MSAA caret detection can corrupt
+        // the thread's DPI awareness, causing wrong coordinate spaces.
+        NativeMethods.SetThreadDpiAwarenessContext(
+            NativeMethods.DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
-        var source = PresentationSource.FromVisual(this);
-        if (source?.CompositionTarget != null)
+        var bubbleHwnd = new WindowInteropHelper(this).Handle;
+
+        // Get bubble size in physical pixels
+        NativeMethods.GetWindowRect(bubbleHwnd, out NativeMethods.RECT bubbleRect);
+        int bubbleW = bubbleRect.Right - bubbleRect.Left;
+        int bubbleH = bubbleRect.Bottom - bubbleRect.Top;
+
+        System.Diagnostics.Debug.WriteLine(
+            $"[Bubble] Caret=({physicalPt.X},{physicalPt.Y}) BubbleSize=({bubbleW}x{bubbleH})");
+
+        // Position in physical pixels: centered on caret, just below
+        int x = physicalPt.X - bubbleW / 2;
+        int y = physicalPt.Y + 4;
+
+        // Get work area of the monitor containing the caret
+        var caretPt = new NativeMethods.POINT { X = physicalPt.X, Y = physicalPt.Y };
+        IntPtr hMonitor = NativeMethods.MonitorFromPoint(
+            caretPt, NativeMethods.MONITOR_DEFAULTTONEAREST);
+        var mi = new NativeMethods.MONITORINFO();
+        mi.cbSize = Marshal.SizeOf<NativeMethods.MONITORINFO>();
+        NativeMethods.GetMonitorInfo(hMonitor, ref mi);
+
+        // Clamp within the correct monitor's work area (all physical pixels)
+        const int margin = 10;
+        if (x + bubbleW > mi.rcWork.Right - margin)
+            x = mi.rcWork.Right - bubbleW - margin;
+        if (x < mi.rcWork.Left + margin)
+            x = mi.rcWork.Left + margin;
+        if (y + bubbleH > mi.rcWork.Bottom - margin)
+            y = physicalPt.Y - bubbleH - 4; // flip above caret
+        if (y < mi.rcWork.Top + margin)
+            y = mi.rcWork.Top + margin;
+
+        System.Diagnostics.Debug.WriteLine(
+            $"[Bubble] Final position=({x},{y}) Monitor=({mi.rcWork.Left},{mi.rcWork.Top})-({mi.rcWork.Right},{mi.rcWork.Bottom})");
+
+        SetPhysicalPosition(bubbleHwnd, x, y);
+    }
+
+    private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
+    {
+        const int WM_DPICHANGED = 0x02E0;
+        if (msg == WM_DPICHANGED && _hasPendingPosition)
         {
-            var transform = source.CompositionTarget.TransformFromDevice;
-            var dip = transform.Transform(new System.Windows.Point(physicalPt.X, physicalPt.Y));
-            dipX = dip.X;
-            dipY = dip.Y;
+            // WPF's default WM_DPICHANGED handler calls SetWindowPos with the
+            // OS-suggested rect (lParam), overriding our placement. This hook runs
+            // BEFORE WPF's handler, so we modify the suggested rect in-place to
+            // keep our desired position while accepting the new DPI-scaled size.
+            var suggested = Marshal.PtrToStructure<NativeMethods.RECT>(lParam);
+            int newW = suggested.Right - suggested.Left;
+            int newH = suggested.Bottom - suggested.Top;
+
+            var corrected = new NativeMethods.RECT
+            {
+                Left = _desiredPhysX,
+                Top = _desiredPhysY,
+                Right = _desiredPhysX + newW,
+                Bottom = _desiredPhysY + newH
+            };
+            Marshal.StructureToPtr(corrected, lParam, false);
+            _hasPendingPosition = false;
         }
+        return IntPtr.Zero;
+    }
 
-        Left = dipX - (ActualWidth / 2);
-        Top = dipY + 4;
-
-        double sw = SystemParameters.PrimaryScreenWidth;
-        double sh = SystemParameters.PrimaryScreenHeight;
-
-        if (Left + ActualWidth > sw - 10)
-            Left = sw - ActualWidth - 10;
-        if (Left < 10)
-            Left = 10;
-        if (Top + ActualHeight > sh - 50)
-            Top = dipY - ActualHeight - 4;
-        if (Top < 10)
-            Top = 10;
+    private void SetPhysicalPosition(IntPtr hwnd, int x, int y)
+    {
+        _desiredPhysX = x;
+        _desiredPhysY = y;
+        _hasPendingPosition = true;
+        NativeMethods.SetWindowPos(hwnd, IntPtr.Zero, x, y, 0, 0,
+            NativeMethods.SWP_NOSIZE | NativeMethods.SWP_NOZORDER | NativeMethods.SWP_NOACTIVATE);
     }
 
     private void OnHideTimerTick(object? sender, EventArgs e)
