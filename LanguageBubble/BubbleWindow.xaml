@@ -24,7 +24,7 @@
     </Window.Resources>
 
     <Border CornerRadius="8"
-            Padding="14,6"
+            Padding="8,6"
             Background="#DD2D2D2D"
             BorderBrush="#44FFFFFF"
             BorderThickness="0.5"

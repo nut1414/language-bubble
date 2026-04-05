@@ -84,7 +84,7 @@ public partial class BubbleWindow : Window
             // Size the canvas to show one item width
             CarouselCanvas.Width = ItemWidth;
             CarouselCanvas.Height = ItemHeight;
-            Width = ItemWidth + 28 + 1; // 28 = padding (14*2), 1 = border
+            Width = ItemWidth + 16 + 1; // 16 = padding (8*2), 1 = border
 
             // Show window first so we can animate
             Opacity = 0;
