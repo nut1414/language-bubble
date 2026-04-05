@@ -10,12 +10,14 @@ internal sealed class KeyboardHook : IDisposable
     private readonly NativeMethods.LowLevelKeyboardProc _hookProc;
     private bool _disposed;
 
+    // Tag injected events so the hook passes them through
+    private const int SELF_INJECTED_TAG = 0x4C42;
+
     // Modifier tracking
     private bool _winHeld;
     private bool _altHeld;
     private bool _shiftHeld;
     private bool _winUsedForCombo;
-    private bool _altShiftFired;
 
     public bool SuppressSelfGenerated { get; set; }
 
@@ -73,6 +75,10 @@ internal sealed class KeyboardHook : IDisposable
 
         var hookStruct = Marshal.PtrToStructure<NativeMethods.KBDLLHOOKSTRUCT>(lParam);
 
+        // Pass through events we injected ourselves (tagged via dwExtraInfo)
+        if (hookStruct.dwExtraInfo == (IntPtr)SELF_INJECTED_TAG)
+            return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
+
         int msg = wParam.ToInt32();
         bool isKeyDown = msg == NativeMethods.WM_KEYDOWN || msg == NativeMethods.WM_SYSKEYDOWN;
         bool isKeyUp = msg == NativeMethods.WM_KEYUP || msg == NativeMethods.WM_SYSKEYUP;
@@ -91,7 +97,15 @@ internal sealed class KeyboardHook : IDisposable
                 if (_winUsedForCombo)
                 {
                     _winUsedForCombo = false;
-                    return (IntPtr)1; // Suppress Win key-up to prevent Start menu
+                    // Suppress the real Win key-up, then inject:
+                    // 1) A harmless Ctrl tap to "dirty" the Win sequence (prevents Start menu)
+                    // 2) A synthetic Win key-up so the OS properly releases Win (prevents stuck key)
+                    // All injected events are tagged so our hook passes them through.
+                    var extra = (UIntPtr)SELF_INJECTED_TAG;
+                    NativeMethods.keybd_event(0xA2, 0, 0, extra);                                    // Ctrl down
+                    NativeMethods.keybd_event(0xA2, 0, NativeMethods.KEYEVENTF_KEYUP, extra);        // Ctrl up
+                    NativeMethods.keybd_event((byte)vk, 0, NativeMethods.KEYEVENTF_KEYUP, extra);    // Win up
+                    return (IntPtr)1; // Suppress the real Win key-up
                 }
             }
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
@@ -107,7 +121,7 @@ internal sealed class KeyboardHook : IDisposable
                     _winUsedForCombo = true;
                     SwitchKeyPressed?.Invoke(HookKeyCombo.WinSpace);
                 }
-                return (IntPtr)1; // Suppress both down and up
+                return (IntPtr)1; // Suppress Space both down and up
             }
             // Not a combo — fall through to generic handler
         }
@@ -120,7 +134,7 @@ internal sealed class KeyboardHook : IDisposable
                 _altHeld = true;
                 if (_shiftHeld && AltShiftMode != SwitchMode.Unused)
                 {
-                    _altShiftFired = true;
+                    // Suppress Alt key-down to prevent Windows native Alt+Shift switch
                     SwitchKeyPressed?.Invoke(HookKeyCombo.AltShift);
                     return (IntPtr)1;
                 }
@@ -128,11 +142,7 @@ internal sealed class KeyboardHook : IDisposable
             else if (isKeyUp)
             {
                 _altHeld = false;
-                if (_altShiftFired)
-                {
-                    _altShiftFired = false;
-                    return (IntPtr)1; // Suppress to prevent Windows native Alt+Shift switch
-                }
+                // Always pass through Alt key-up to avoid stuck Alt
             }
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
@@ -145,7 +155,7 @@ internal sealed class KeyboardHook : IDisposable
                 _shiftHeld = true;
                 if (_altHeld && AltShiftMode != SwitchMode.Unused)
                 {
-                    _altShiftFired = true;
+                    // Suppress Shift key-down to prevent Windows native Alt+Shift switch
                     SwitchKeyPressed?.Invoke(HookKeyCombo.AltShift);
                     return (IntPtr)1;
                 }
@@ -153,11 +163,7 @@ internal sealed class KeyboardHook : IDisposable
             else if (isKeyUp)
             {
                 _shiftHeld = false;
-                if (_altShiftFired)
-                {
-                    _altShiftFired = false;
-                    return (IntPtr)1; // Suppress to prevent Windows native Alt+Shift switch
-                }
+                // Always pass through Shift key-up to avoid stuck Shift
             }
             return NativeMethods.CallNextHookEx(_hookId, nCode, wParam, lParam);
         }
