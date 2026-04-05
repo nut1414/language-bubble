@@ -1,12 +1,7 @@
 using System.Windows;
-using System.Windows.Threading;
+using System.Windows.Controls;
 using LanguageBubble.Native;
 using LanguageBubble.Services;
-using WinForms = System.Windows.Forms;
-using DrawingFont = System.Drawing.Font;
-using DrawingFontStyle = System.Drawing.FontStyle;
-using DrawingIcon = System.Drawing.Icon;
-using DrawingSystemIcons = System.Drawing.SystemIcons;
 using Application = System.Windows.Application;
 
 namespace LanguageBubble;
@@ -17,8 +12,10 @@ public partial class App : Application
     private KeyboardHook? _keyboardHook;
     private LanguageService? _languageService;
     private BubbleWindow? _bubbleWindow;
-    private WinForms.NotifyIcon? _notifyIcon;
+    private NativeTrayIcon? _trayIcon;
+    private ContextMenu? _contextMenu;
     private bool _isSwitching;
+    private bool _useMruSwitching;
 
     protected override void OnStartup(StartupEventArgs e)
     {
@@ -28,8 +25,8 @@ public partial class App : Application
         _singleInstanceMutex = new Mutex(true, "Global\\LanguageBubble_SingleInstance", out bool createdNew);
         if (!createdNew)
         {
-            WinForms.MessageBox.Show("Language Bubble is already running.", "Language Bubble",
-                WinForms.MessageBoxButtons.OK, WinForms.MessageBoxIcon.Information);
+            MessageBox.Show("Language Bubble is already running.", "Language Bubble",
+                MessageBoxButton.OK, MessageBoxImage.Information);
             Shutdown();
             return;
         }
@@ -37,6 +34,13 @@ public partial class App : Application
         // Initialize services
         _languageService = new LanguageService();
         _languageService.RefreshLayouts();
+
+        _useMruSwitching = GetSavedMruSwitching();
+
+        // Seed MRU with the currently active language
+        var initialLayout = _languageService.GetCurrentLayout();
+        if (initialLayout != null)
+            _languageService.RecordLayoutUsage(initialLayout.Hkl);
 
         // Create bubble window
         _bubbleWindow = new BubbleWindow();
@@ -56,78 +60,65 @@ public partial class App : Application
 
     private void SetupTrayIcon()
     {
-        _notifyIcon = new WinForms.NotifyIcon
-        {
-            Text = "Language Bubble",
-            Visible = true
-        };
+        var iconPath = System.IO.Path.Combine(
+            AppDomain.CurrentDomain.BaseDirectory, "Resources", "app.ico");
 
-        // Load icon from embedded resource
-        try
-        {
-            var iconPath = System.IO.Path.Combine(
-                AppDomain.CurrentDomain.BaseDirectory, "Resources", "app.ico");
-            if (System.IO.File.Exists(iconPath))
-            {
-                _notifyIcon.Icon = new DrawingIcon(iconPath);
-            }
-            else
-            {
-                _notifyIcon.Icon = DrawingSystemIcons.Application;
-            }
-        }
-        catch
-        {
-            _notifyIcon.Icon = DrawingSystemIcons.Application;
-        }
-
-        RebuildContextMenu();
+        _trayIcon = new NativeTrayIcon();
+        _trayIcon.Create("Language Bubble", iconPath);
+        _trayIcon.RightClick += OnTrayRightClick;
     }
 
-    private void RebuildContextMenu()
+    private void OnTrayRightClick()
     {
-        if (_notifyIcon == null || _languageService == null)
-            return;
+        BuildContextMenu();
+        _contextMenu!.IsOpen = true;
+    }
 
-        var oldMenu = _notifyIcon.ContextMenuStrip;
+    private void BuildContextMenu()
+    {
+        if (_languageService == null) return;
 
-        var menu = new WinForms.ContextMenuStrip();
+        _contextMenu = new ContextMenu();
 
         // Header
-        var header = new WinForms.ToolStripLabel("Languages");
-        header.Font = new DrawingFont(header.Font, DrawingFontStyle.Bold);
-        menu.Items.Add(header);
-        menu.Items.Add(new WinForms.ToolStripSeparator());
+        _contextMenu.Items.Add(new MenuItem
+        {
+            Header = "Languages",
+            IsEnabled = false,
+            FontWeight = FontWeights.Bold
+        });
+        _contextMenu.Items.Add(new Separator());
 
         // Language items
         var current = _languageService.GetCurrentLayout();
         foreach (var layout in _languageService.Layouts)
         {
-            var item = new WinForms.ToolStripMenuItem(
-                $"{layout.DisplayName} - {layout.Culture.EnglishName}");
-
-            if (current != null && layout.Hkl == current.Hkl)
+            var item = new MenuItem
             {
-                item.Checked = true;
-            }
-
-            menu.Items.Add(item);
+                Header = $"{layout.DisplayName} - {layout.Culture.EnglishName}",
+                IsCheckable = true,
+                IsChecked = current != null && layout.Hkl == current.Hkl
+            };
+            _contextMenu.Items.Add(item);
         }
 
-        menu.Items.Add(new WinForms.ToolStripSeparator());
+        _contextMenu.Items.Add(new Separator());
 
         // Start with Windows toggle
-        var startWithWindows = new WinForms.ToolStripMenuItem("Start with Windows");
-        startWithWindows.Checked = IsStartWithWindowsEnabled();
+        var startWithWindows = new MenuItem
+        {
+            Header = "Start with Windows",
+            IsCheckable = true,
+            IsChecked = IsStartWithWindowsEnabled()
+        };
         startWithWindows.Click += (_, _) =>
         {
-            ToggleStartWithWindows(!startWithWindows.Checked);
-            startWithWindows.Checked = IsStartWithWindowsEnabled();
+            ToggleStartWithWindows(startWithWindows.IsChecked);
         };
-        menu.Items.Add(startWithWindows);
+        _contextMenu.Items.Add(startWithWindows);
 
         // Size submenu
-        var sizeMenu = new WinForms.ToolStripMenuItem("Size");
+        var sizeMenu = new MenuItem { Header = "Size" };
         var currentSize = _bubbleWindow?.CurrentSize ?? BubbleSize.Medium;
         var sizeOptions = new (string Label, BubbleSize Value)[]
         {
@@ -139,42 +130,56 @@ public partial class App : Application
         };
         foreach (var (label, value) in sizeOptions)
         {
-            var sizeItem = new WinForms.ToolStripMenuItem(label);
-            sizeItem.Checked = value == currentSize;
+            var sizeItem = new MenuItem
+            {
+                Header = label,
+                IsCheckable = true,
+                IsChecked = value == currentSize
+            };
             var captured = value;
             sizeItem.Click += (_, _) =>
             {
                 _bubbleWindow?.SetSize(captured);
                 SaveBubbleSize(captured);
-                RebuildContextMenu();
             };
-            sizeMenu.DropDownItems.Add(sizeItem);
+            sizeMenu.Items.Add(sizeItem);
         }
-        menu.Items.Add(sizeMenu);
+        _contextMenu.Items.Add(sizeMenu);
 
         // Slide animation toggle
-        var slideAnimation = new WinForms.ToolStripMenuItem("Slide Animation");
-        slideAnimation.Checked = _bubbleWindow?.UseSlideAnimation ?? true;
+        var slideAnimation = new MenuItem
+        {
+            Header = "Slide Animation",
+            IsCheckable = true,
+            IsChecked = _bubbleWindow?.UseSlideAnimation ?? true
+        };
         slideAnimation.Click += (_, _) =>
         {
             if (_bubbleWindow != null)
-            {
-                _bubbleWindow.UseSlideAnimation = !_bubbleWindow.UseSlideAnimation;
-                slideAnimation.Checked = _bubbleWindow.UseSlideAnimation;
-            }
+                _bubbleWindow.UseSlideAnimation = slideAnimation.IsChecked;
         };
-        menu.Items.Add(slideAnimation);
+        _contextMenu.Items.Add(slideAnimation);
 
-        menu.Items.Add(new WinForms.ToolStripSeparator());
+        // MRU switching toggle
+        var mruSwitching = new MenuItem
+        {
+            Header = "Switch Between Recent and English",
+            IsCheckable = true,
+            IsChecked = _useMruSwitching
+        };
+        mruSwitching.Click += (_, _) =>
+        {
+            _useMruSwitching = mruSwitching.IsChecked;
+            SaveMruSwitching(_useMruSwitching);
+        };
+        _contextMenu.Items.Add(mruSwitching);
+
+        _contextMenu.Items.Add(new Separator());
 
         // Exit
-        var exitItem = new WinForms.ToolStripMenuItem("Exit");
+        var exitItem = new MenuItem { Header = "Exit" };
         exitItem.Click += (_, _) => ExitApplication();
-        menu.Items.Add(exitItem);
-
-        _notifyIcon.ContextMenuStrip = menu;
-
-        oldMenu?.Dispose();
+        _contextMenu.Items.Add(exitItem);
     }
 
     private void OnCapsLockPressed()
@@ -193,10 +198,20 @@ public partial class App : Application
                 // Ensure Caps Lock stays off
                 CapsLockService.EnsureCapsLockOff(_keyboardHook!);
 
-                // Switch to the next language
-                var newLayout = _languageService!.SwitchToNextLayout();
+                // Record the current layout before switching so external
+                // changes (Win+Space, taskbar) are captured in MRU history
+                var beforeSwitch = _languageService!.GetCurrentLayout();
+                if (beforeSwitch != null)
+                    _languageService.RecordLayoutUsage(beforeSwitch.Hkl);
+
+                // Switch language
+                var newLayout = _useMruSwitching
+                    ? _languageService!.SwitchToMruLayout()
+                    : _languageService!.SwitchToNextLayout();
                 if (newLayout == null)
                     return;
+
+                _languageService.RecordLayoutUsage(newLayout.Hkl);
 
                 // Get caret position (physical pixels)
                 var caretPos = CaretPositionService.GetCaretScreenPosition();
@@ -226,12 +241,7 @@ public partial class App : Application
     private void ExitApplication()
     {
         _keyboardHook?.Dispose();
-
-        if (_notifyIcon != null)
-        {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
-        }
+        _trayIcon?.Dispose();
 
         _singleInstanceMutex?.ReleaseMutex();
         _singleInstanceMutex?.Dispose();
@@ -242,12 +252,7 @@ public partial class App : Application
     protected override void OnExit(ExitEventArgs e)
     {
         _keyboardHook?.Dispose();
-
-        if (_notifyIcon != null)
-        {
-            _notifyIcon.Visible = false;
-            _notifyIcon.Dispose();
-        }
+        _trayIcon?.Dispose();
 
         _singleInstanceMutex?.Dispose();
         base.OnExit(e);
@@ -288,6 +293,30 @@ public partial class App : Application
             using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
                 @"Software\LanguageBubble");
             key.SetValue("Size", size.ToString());
+        }
+        catch { }
+    }
+
+    private static bool GetSavedMruSwitching()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\LanguageBubble", false);
+            var value = key?.GetValue("MruSwitching") as string;
+            return value == "True";
+        }
+        catch { }
+        return false;
+    }
+
+    private static void SaveMruSwitching(bool enabled)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+            key.SetValue("MruSwitching", enabled.ToString());
         }
         catch { }
     }

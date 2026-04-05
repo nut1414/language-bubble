@@ -32,6 +32,7 @@ internal sealed class LayoutInfo
 internal sealed class LanguageService
 {
     private List<LayoutInfo> _layouts = new();
+    private IntPtr _lastNonEnglishHkl = IntPtr.Zero;
 
     public IReadOnlyList<LayoutInfo> Layouts => _layouts;
 
@@ -81,6 +82,15 @@ internal sealed class LanguageService
             ?? CreateLayoutInfoFromHkl(currentHkl);
     }
 
+    public void RecordLayoutUsage(IntPtr hkl)
+    {
+        if (hkl == IntPtr.Zero)
+            return;
+        var layout = _layouts.FirstOrDefault(l => l.Hkl == hkl);
+        if (layout != null && layout.Culture.TwoLetterISOLanguageName != "en")
+            _lastNonEnglishHkl = hkl;
+    }
+
     public LayoutInfo? SwitchToNextLayout()
     {
         if (_layouts.Count <= 1)
@@ -93,22 +103,64 @@ internal sealed class LanguageService
 
         int nextIndex = (currentIndex + 1) % _layouts.Count;
         var target = _layouts[nextIndex];
+        ActivateLayout(target);
+        return target;
+    }
 
+    public LayoutInfo? SwitchToMruLayout()
+    {
+        if (_layouts.Count <= 1)
+            return _layouts.FirstOrDefault();
+
+        var current = GetCurrentLayout();
+        bool currentIsEnglish = current != null
+            && current.Culture.TwoLetterISOLanguageName == "en";
+
+        if (currentIsEnglish)
+        {
+            // Switch to the last non-English language
+            if (_lastNonEnglishHkl != IntPtr.Zero)
+            {
+                var target = _layouts.FirstOrDefault(l => l.Hkl == _lastNonEnglishHkl);
+                if (target != null)
+                {
+                    ActivateLayout(target);
+                    return target;
+                }
+            }
+            // No non-English history yet — pick the first non-English layout
+            var fallback = _layouts.FirstOrDefault(l => l.Culture.TwoLetterISOLanguageName != "en");
+            if (fallback != null)
+            {
+                ActivateLayout(fallback);
+                return fallback;
+            }
+        }
+        else
+        {
+            // Current is non-English — always switch back to English
+            var english = _layouts.FirstOrDefault(l => l.Culture.TwoLetterISOLanguageName == "en");
+            if (english != null)
+            {
+                ActivateLayout(english);
+                return english;
+            }
+        }
+
+        return SwitchToNextLayout();
+    }
+
+    private void ActivateLayout(LayoutInfo target)
+    {
         IntPtr hwnd = NativeMethods.GetForegroundWindow();
 
-        // 1. Send to the foreground window (works for apps with text input)
         if (hwnd != IntPtr.Zero)
         {
             NativeMethods.PostMessage(hwnd, NativeMethods.WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, target.Hkl);
         }
 
-        // 2. Broadcast to all top-level windows (catches system UI, Start Menu, etc.)
         NativeMethods.PostMessage(NativeMethods.HWND_BROADCAST, NativeMethods.WM_INPUTLANGCHANGEREQUEST, IntPtr.Zero, target.Hkl);
-
-        // 3. Activate for the current process (ensures subsequent windows use it)
         NativeMethods.ActivateKeyboardLayout(target.Hkl, NativeMethods.KLF_SETFORPROCESS);
-
-        return target;
     }
 
     private static LayoutInfo CreateLayoutInfoFromHkl(IntPtr hkl)

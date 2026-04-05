@@ -391,5 +391,10 @@ public partial class BubbleWindow : Window
     private void OnFadeOutCompleted(object? sender, EventArgs e)
     {
         Hide();
+
+        // Return memory to the OS — .NET GC holds committed pages by default.
+        // A gen-2 collect after the bubble hides reclaims animation objects,
+        // COM wrappers from caret detection, and other transient allocations.
+        GC.Collect(2, GCCollectionMode.Forced, false, true);
     }
 }
