@@ -51,6 +51,7 @@ public partial class App : Application
 
         // Create bubble window
         _bubbleWindow = new BubbleWindow();
+        _bubbleWindow.SetSize(GetSavedBubbleSize());
 
         // Install keyboard hook
         _keyboardHook = new KeyboardHook();
@@ -133,6 +134,32 @@ public partial class App : Application
             startWithWindows.Checked = IsStartWithWindowsEnabled();
         };
         menu.Items.Add(startWithWindows);
+
+        // Size submenu
+        var sizeMenu = new WinForms.ToolStripMenuItem("Size");
+        var currentSize = _bubbleWindow?.CurrentSize ?? BubbleSize.Medium;
+        var sizeOptions = new (string Label, BubbleSize Value)[]
+        {
+            ("Extra Small", BubbleSize.ExtraSmall),
+            ("Small", BubbleSize.Small),
+            ("Medium", BubbleSize.Medium),
+            ("Large", BubbleSize.Large),
+            ("Extra Large", BubbleSize.ExtraLarge),
+        };
+        foreach (var (label, value) in sizeOptions)
+        {
+            var sizeItem = new WinForms.ToolStripMenuItem(label);
+            sizeItem.Checked = value == currentSize;
+            var captured = value;
+            sizeItem.Click += (_, _) =>
+            {
+                _bubbleWindow?.SetSize(captured);
+                SaveBubbleSize(captured);
+                RebuildContextMenu();
+            };
+            sizeMenu.DropDownItems.Add(sizeItem);
+        }
+        menu.Items.Add(sizeMenu);
 
         // Slide animation toggle
         var slideAnimation = new WinForms.ToolStripMenuItem("Slide Animation");
@@ -248,6 +275,31 @@ public partial class App : Application
         {
             return false;
         }
+    }
+
+    private static BubbleSize GetSavedBubbleSize()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.OpenSubKey(
+                @"Software\LanguageBubble", false);
+            var value = key?.GetValue("Size") as string;
+            if (value != null && Enum.TryParse<BubbleSize>(value, out var size))
+                return size;
+        }
+        catch { }
+        return BubbleSize.Medium;
+    }
+
+    private static void SaveBubbleSize(BubbleSize size)
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.CurrentUser.CreateSubKey(
+                @"Software\LanguageBubble");
+            key.SetValue("Size", size.ToString());
+        }
+        catch { }
     }
 
     private static void ToggleStartWithWindows(bool enable)

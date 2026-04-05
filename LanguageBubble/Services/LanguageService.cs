@@ -18,6 +18,7 @@ internal sealed class LayoutInfo
             string twoLetter = Culture.TwoLetterISOLanguageName;
             return twoLetter switch
             {
+                "en" => "A",    // Show "EN" instead of "US" for English
                 "ja" => "\u3042",    // Hiragana 'a' - recognizable Japanese symbol
                 "zh" => "\u4e2d",    // Chinese character for 'middle/China'
                 "ko" => "\uac00",    // Korean character 'ga'

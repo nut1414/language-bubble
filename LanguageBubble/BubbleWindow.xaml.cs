@@ -10,13 +10,16 @@ using LanguageBubble.Services;
 
 namespace LanguageBubble;
 
+public enum BubbleSize { ExtraSmall, Small, Medium, Large, ExtraLarge }
+
 public partial class BubbleWindow : Window
 {
     private readonly DispatcherTimer _hideTimer;
     private Storyboard? _fadeOutStoryboard;
 
-    private const double ItemWidth = 40;
-    private const double ItemHeight = 24;
+    private double _itemWidth = 32;
+    private double _itemHeight = 24;
+    private double _fontSize = 18;
     private int _previousSelectedIndex = -1;
     private int _layoutCount;
     private readonly List<TextBlock> _labels = new();
@@ -24,6 +27,42 @@ public partial class BubbleWindow : Window
     private bool _hasPendingPosition;
 
     public bool UseSlideAnimation { get; set; } = true;
+    public BubbleSize CurrentSize { get; private set; } = BubbleSize.Medium;
+
+    public void SetSize(BubbleSize size)
+    {
+        CurrentSize = size;
+        switch (size)
+        {
+            case BubbleSize.ExtraSmall:
+                _itemWidth = 20; _itemHeight = 16; _fontSize = 11;
+                OuterBorder.Padding = new Thickness(3, 3, 3, 3);
+                OuterBorder.CornerRadius = new CornerRadius(5);
+                break;
+            case BubbleSize.Small:
+                _itemWidth = 26; _itemHeight = 20; _fontSize = 14;
+                OuterBorder.Padding = new Thickness(4, 4, 4, 4);
+                OuterBorder.CornerRadius = new CornerRadius(6);
+                break;
+            case BubbleSize.Medium:
+                _itemWidth = 32; _itemHeight = 24; _fontSize = 18;
+                OuterBorder.Padding = new Thickness(6, 6, 6, 6);
+                OuterBorder.CornerRadius = new CornerRadius(8);
+                break;
+            case BubbleSize.Large:
+                _itemWidth = 42; _itemHeight = 32; _fontSize = 22;
+                OuterBorder.Padding = new Thickness(8, 8, 8, 8);
+                OuterBorder.CornerRadius = new CornerRadius(10);
+                break;
+            case BubbleSize.ExtraLarge:
+                _itemWidth = 52; _itemHeight = 40; _fontSize = 28;
+                OuterBorder.Padding = new Thickness(10, 10, 10, 10);
+                OuterBorder.CornerRadius = new CornerRadius(12);
+                break;
+        }
+        // Force label rebuild on next show
+        _layoutCount = 0;
+    }
 
     public BubbleWindow()
     {
@@ -82,9 +121,9 @@ public partial class BubbleWindow : Window
             CarouselCanvas.Visibility = Visibility.Visible;
 
             // Size the canvas to show one item width
-            CarouselCanvas.Width = ItemWidth;
-            CarouselCanvas.Height = ItemHeight;
-            Width = ItemWidth + 16 + 1; // 16 = padding (8*2), 1 = border
+            CarouselCanvas.Width = _itemWidth;
+            CarouselCanvas.Height = _itemHeight;
+            Width = _itemWidth + 16 + 1; // 16 = padding (8*2), 1 = border
 
             // Show window first so we can animate
             Opacity = 0;
@@ -103,7 +142,7 @@ public partial class BubbleWindow : Window
                 _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
             }
 
-            double targetX = -selectedIndex * ItemWidth;
+            double targetX = -selectedIndex * _itemWidth;
 
             if (shouldSlide)
             {
@@ -147,9 +186,9 @@ public partial class BubbleWindow : Window
         {
             // --- Simple single-label mode ---
             CarouselCanvas.Visibility = Visibility.Visible;
-            CarouselCanvas.Width = ItemWidth;
-            CarouselCanvas.Height = ItemHeight;
-            Width = ItemWidth + 28 + 1;
+            CarouselCanvas.Width = _itemWidth;
+            CarouselCanvas.Height = _itemHeight;
+            Width = _itemWidth + 28 + 1;
 
             // Show only selected label — clear any leftover animations first
             for (int i = 0; i < _labels.Count; i++)
@@ -159,7 +198,7 @@ public partial class BubbleWindow : Window
             }
 
             RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
-            RowTranslate.X = -selectedIndex * ItemWidth;
+            RowTranslate.X = -selectedIndex * _itemWidth;
 
             Opacity = 0;
             Show();
@@ -192,13 +231,13 @@ public partial class BubbleWindow : Window
             {
                 Text = layout.BubbleText,
                 Foreground = System.Windows.Media.Brushes.White,
-                FontSize = 18,
+                FontSize = _fontSize,
                 FontFamily = new System.Windows.Media.FontFamily("Segoe UI Semibold"),
                 TextAlignment = TextAlignment.Center,
                 VerticalAlignment = VerticalAlignment.Center,
-                Width = ItemWidth,
-                Height = ItemHeight,
-                LineHeight = ItemHeight,
+                Width = _itemWidth,
+                Height = _itemHeight,
+                LineHeight = _itemHeight,
                 Opacity = 0.3
             };
             _labels.Add(label);
