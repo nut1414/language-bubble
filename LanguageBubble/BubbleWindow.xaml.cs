@@ -7,6 +7,7 @@ using System.Windows.Media.Animation;
 using System.Windows.Threading;
 using LanguageBubble.Native;
 using LanguageBubble.Services;
+using Microsoft.Win32;
 
 namespace LanguageBubble;
 
@@ -26,6 +27,23 @@ public partial class BubbleWindow : Window
     private static readonly System.Windows.Media.FontFamily s_font = new("Segoe UI Semibold");
     private int _desiredPhysX, _desiredPhysY;
     private bool _hasPendingPosition;
+    private Brush _foreground = Brushes.White;
+
+    // Dark mode colors
+    private static readonly Brush s_darkBackground = new SolidColorBrush(Color.FromArgb(0xDD, 0x2D, 0x2D, 0x2D));
+    private static readonly Brush s_darkBorder = new SolidColorBrush(Color.FromArgb(0x44, 0xFF, 0xFF, 0xFF));
+
+    // Light mode colors
+    private static readonly Brush s_lightBackground = new SolidColorBrush(Color.FromArgb(0xDD, 0xF3, 0xF3, 0xF3));
+    private static readonly Brush s_lightBorder = new SolidColorBrush(Color.FromArgb(0x44, 0x00, 0x00, 0x00));
+
+    static BubbleWindow()
+    {
+        s_darkBackground.Freeze();
+        s_darkBorder.Freeze();
+        s_lightBackground.Freeze();
+        s_lightBorder.Freeze();
+    }
 
     public bool UseSlideAnimation { get; set; } = true;
     public BubbleSize CurrentSize { get; private set; } = BubbleSize.Medium;
@@ -36,27 +54,27 @@ public partial class BubbleWindow : Window
         switch (size)
         {
             case BubbleSize.ExtraSmall:
-                _itemWidth = 20; _itemHeight = 16; _fontSize = 11;
+                _itemWidth = 18; _itemHeight = 16; _fontSize = 11;
                 OuterBorder.Padding = new Thickness(3, 3, 3, 3);
                 OuterBorder.CornerRadius = new CornerRadius(5);
                 break;
             case BubbleSize.Small:
-                _itemWidth = 26; _itemHeight = 20; _fontSize = 14;
+                _itemWidth = 24; _itemHeight = 20; _fontSize = 14;
                 OuterBorder.Padding = new Thickness(4, 4, 4, 4);
                 OuterBorder.CornerRadius = new CornerRadius(6);
                 break;
             case BubbleSize.Medium:
-                _itemWidth = 32; _itemHeight = 24; _fontSize = 18;
+                _itemWidth = 30; _itemHeight = 24; _fontSize = 18;
                 OuterBorder.Padding = new Thickness(6, 6, 6, 6);
                 OuterBorder.CornerRadius = new CornerRadius(8);
                 break;
             case BubbleSize.Large:
-                _itemWidth = 42; _itemHeight = 32; _fontSize = 22;
+                _itemWidth = 40; _itemHeight = 32; _fontSize = 22;
                 OuterBorder.Padding = new Thickness(8, 8, 8, 8);
                 OuterBorder.CornerRadius = new CornerRadius(10);
                 break;
             case BubbleSize.ExtraLarge:
-                _itemWidth = 52; _itemHeight = 40; _fontSize = 28;
+                _itemWidth = 50; _itemHeight = 40; _fontSize = 28;
                 OuterBorder.Padding = new Thickness(10, 10, 10, 10);
                 OuterBorder.CornerRadius = new CornerRadius(12);
                 break;
@@ -104,6 +122,31 @@ public partial class BubbleWindow : Window
 
         _fadeOutStoryboard = (Storyboard)FindResource("FadeOut");
         _fadeOutStoryboard.Completed += OnFadeOutCompleted;
+
+        ApplyTheme();
+    }
+
+    private void ApplyTheme()
+    {
+        bool dark = IsWindowsDarkMode();
+        OuterBorder.Background = dark ? s_darkBackground : s_lightBackground;
+        OuterBorder.BorderBrush = dark ? s_darkBorder : s_lightBorder;
+        _foreground = dark ? Brushes.White : Brushes.Black;
+
+        foreach (var label in _labels)
+            label.Foreground = _foreground;
+    }
+
+    private static bool IsWindowsDarkMode()
+    {
+        try
+        {
+            using var key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize", false);
+            var value = key?.GetValue("AppsUseLightTheme");
+            return value is int i && i == 0;
+        }
+        catch { return true; }
     }
 
     internal void ShowBubble(IReadOnlyList<LayoutInfo> layouts, int selectedIndex,
@@ -240,7 +283,7 @@ public partial class BubbleWindow : Window
             var label = new TextBlock
             {
                 Text = layout.BubbleText,
-                Foreground = System.Windows.Media.Brushes.White,
+                Foreground = _foreground,
                 FontSize = _fontSize,
                 FontFamily = s_font,
                 TextAlignment = TextAlignment.Center,
@@ -349,6 +392,14 @@ public partial class BubbleWindow : Window
 
     private IntPtr WndProc(IntPtr hwnd, int msg, IntPtr wParam, IntPtr lParam, ref bool handled)
     {
+        const int WM_SETTINGCHANGE = 0x001A;
+        if (msg == WM_SETTINGCHANGE)
+        {
+            var param = lParam != IntPtr.Zero ? Marshal.PtrToStringUni(lParam) : null;
+            if (param == "ImmersiveColorSet")
+                ApplyTheme();
+        }
+
         const int WM_DPICHANGED = 0x02E0;
         if (msg == WM_DPICHANGED && _hasPendingPosition)
         {
