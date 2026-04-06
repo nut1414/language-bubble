@@ -19,11 +19,14 @@ use windows::Win32::System::Com::*;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
+use windows::Win32::UI::HiDpi::*;
+
 use types::*;
 
 const MSG_WINDOW_CLASS: PCWSTR = w!("LanguageBubbleMsgWindow");
 const MUTEX_NAME: PCWSTR = w!("Global\\LanguageBubble_SingleInstance");
 const WM_SETTINGCHANGE: u32 = 0x001A;
+const DPI_AWARENESS_CONTEXT_PMV2: isize = -4;
 
 struct AppState {
     language_service: language::LanguageService,
@@ -57,6 +60,15 @@ where
 }
 
 fn main() {
+    // Declare Per-Monitor DPI Awareness v2 before any window creation.
+    // Without this, Windows virtualizes coordinates at 96 DPI and
+    // bitmap-stretches the window, causing blurriness at >100% scaling.
+    unsafe {
+        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
+            DPI_AWARENESS_CONTEXT_PMV2 as _,
+        ));
+    }
+
     // COM initialization for UI Automation
     unsafe {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);

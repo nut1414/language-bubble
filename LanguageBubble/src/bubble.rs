@@ -146,14 +146,18 @@ impl BubbleWindow {
                 width: (rc.right - rc.left).max(1) as u32,
                 height: (rc.bottom - rc.top).max(1) as u32,
             };
+            // Use actual monitor DPI so D2D correctly scales DIP-based
+            // drawing coordinates (fonts, padding, radii) to physical pixels.
+            let dpi = GetDpiForWindow(self.hwnd) as f32;
+            let dpi = if dpi > 0.0 { dpi } else { 96.0 };
             let props = D2D1_RENDER_TARGET_PROPERTIES {
                 r#type: D2D1_RENDER_TARGET_TYPE_DEFAULT,
                 pixelFormat: D2D1_PIXEL_FORMAT {
                     format: windows::Win32::Graphics::Dxgi::Common::DXGI_FORMAT_B8G8R8A8_UNORM,
                     alphaMode: D2D1_ALPHA_MODE_PREMULTIPLIED,
                 },
-                dpiX: 96.0,
-                dpiY: 96.0,
+                dpiX: dpi,
+                dpiY: dpi,
                 ..Default::default()
             };
             let hwnd_props = D2D1_HWND_RENDER_TARGET_PROPERTIES {
@@ -208,8 +212,10 @@ impl BubbleWindow {
             }
             _ => (metrics.item_width, metrics.item_height),
         };
-        let win_w = (content_w + metrics.padding * 2.0 + 1.0) as i32;
-        let win_h = (content_h + metrics.padding * 2.0 + 1.0) as i32;
+        // Scale DIP dimensions to physical pixels for SetWindowPos under PMv2
+        let dpi_scale = self.get_dpi_scale();
+        let win_w = ((content_w + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
+        let win_h = ((content_h + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
 
         // Resize and position
         unsafe {
@@ -481,13 +487,8 @@ impl BubbleWindow {
 
     fn get_dpi_scale(&self) -> f32 {
         unsafe {
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let phys_w = (rect.right - rect.left) as f32;
-            let mut client = RECT::default();
-            let _ = GetClientRect(self.hwnd, &mut client);
-            let client_w = (client.right - client.left).max(1) as f32;
-            phys_w / client_w
+            let dpi = GetDpiForWindow(self.hwnd);
+            if dpi > 0 { dpi as f32 / 96.0 } else { 1.0 }
         }
     }
 
@@ -497,13 +498,17 @@ impl BubbleWindow {
                 DPI_AWARENESS_CONTEXT_PMV2 as _,
             ));
 
+            let dpi_scale = self.get_dpi_scale();
+            let margin = (10.0 * dpi_scale) as i32;
+            let caret_offset = (4.0 * dpi_scale) as i32;
+
             let mut rect = RECT::default();
             GetWindowRect(self.hwnd, &mut rect).ok();
             let bw = rect.right - rect.left;
             let bh = rect.bottom - rect.top;
 
             let mut x = phys_pt.x - bw / 2;
-            let mut y = phys_pt.y + 4;
+            let mut y = phys_pt.y + caret_offset;
 
             // Clamp to monitor work area
             let pt = POINT {
@@ -517,18 +522,17 @@ impl BubbleWindow {
             };
             let _ = GetMonitorInfoW(hmon, &mut mi);
 
-            const MARGIN: i32 = 10;
-            if x + bw > mi.rcWork.right - MARGIN {
-                x = mi.rcWork.right - bw - MARGIN;
+            if x + bw > mi.rcWork.right - margin {
+                x = mi.rcWork.right - bw - margin;
             }
-            if x < mi.rcWork.left + MARGIN {
-                x = mi.rcWork.left + MARGIN;
+            if x < mi.rcWork.left + margin {
+                x = mi.rcWork.left + margin;
             }
-            if y + bh > mi.rcWork.bottom - MARGIN {
-                y = phys_pt.y - bh - 4; // flip above
+            if y + bh > mi.rcWork.bottom - margin {
+                y = phys_pt.y - bh - caret_offset; // flip above
             }
-            if y < mi.rcWork.top + MARGIN {
-                y = mi.rcWork.top + MARGIN;
+            if y < mi.rcWork.top + margin {
+                y = mi.rcWork.top + margin;
             }
 
             self.set_physical_position(x, y);
@@ -541,16 +545,14 @@ impl BubbleWindow {
                 DPI_AWARENESS_CONTEXT_PMV2 as _,
             ));
 
+            let dpi_scale = self.get_dpi_scale();
+            let margin = (10.0 * dpi_scale) as i32;
+            let caret_offset = (4.0 * dpi_scale) as i32;
+
             let mut rect = RECT::default();
             GetWindowRect(self.hwnd, &mut rect).ok();
             let bw = rect.right - rect.left;
             let bh = rect.bottom - rect.top;
-            let dpi_scale = bw as f32
-                / {
-                    let mut c = RECT::default();
-                    let _ = GetClientRect(self.hwnd, &mut c);
-                    (c.right - c.left).max(1) as f32
-                };
 
             let metrics = self.size.metrics();
             let selected_center_dip =
@@ -558,7 +560,7 @@ impl BubbleWindow {
             let selected_center_phys = (selected_center_dip * dpi_scale) as i32;
 
             let mut x = phys_pt.x - selected_center_phys;
-            let mut y = phys_pt.y + 4;
+            let mut y = phys_pt.y + caret_offset;
 
             // Clamp to monitor
             let pt = POINT {
@@ -572,18 +574,17 @@ impl BubbleWindow {
             };
             let _ = GetMonitorInfoW(hmon, &mut mi);
 
-            const MARGIN: i32 = 10;
-            if x + bw > mi.rcWork.right - MARGIN {
-                x = mi.rcWork.right - bw - MARGIN;
+            if x + bw > mi.rcWork.right - margin {
+                x = mi.rcWork.right - bw - margin;
             }
-            if x < mi.rcWork.left + MARGIN {
-                x = mi.rcWork.left + MARGIN;
+            if x < mi.rcWork.left + margin {
+                x = mi.rcWork.left + margin;
             }
-            if y + bh > mi.rcWork.bottom - MARGIN {
-                y = phys_pt.y - bh - 4;
+            if y + bh > mi.rcWork.bottom - margin {
+                y = phys_pt.y - bh - caret_offset;
             }
-            if y < mi.rcWork.top + MARGIN {
-                y = mi.rcWork.top + MARGIN;
+            if y < mi.rcWork.top + margin {
+                y = mi.rcWork.top + margin;
             }
 
             self.set_physical_position(x, y);
@@ -597,10 +598,12 @@ impl BubbleWindow {
                 DPI_AWARENESS_CONTEXT_PMV2 as _,
             ));
 
+            let dpi_scale = self.get_dpi_scale();
+            let margin = (10.0 * dpi_scale) as i32;
+
             let mut rect = RECT::default();
             GetWindowRect(self.hwnd, &mut rect).ok();
             let bw = rect.right - rect.left;
-            let dpi_scale = self.get_dpi_scale();
 
             let metrics = self.size.metrics();
             let selected_center_dip =
@@ -618,12 +621,11 @@ impl BubbleWindow {
             };
             let _ = GetMonitorInfoW(hmon, &mut mi);
 
-            const MARGIN: i32 = 10;
-            if x + bw > mi.rcWork.right - MARGIN {
-                x = mi.rcWork.right - bw - MARGIN;
+            if x + bw > mi.rcWork.right - margin {
+                x = mi.rcWork.right - bw - margin;
             }
-            if x < mi.rcWork.left + MARGIN {
-                x = mi.rcWork.left + MARGIN;
+            if x < mi.rcWork.left + margin {
+                x = mi.rcWork.left + margin;
             }
             x
         }
@@ -636,11 +638,15 @@ impl BubbleWindow {
                 DPI_AWARENESS_CONTEXT_PMV2 as _,
             ));
 
+            let dpi_scale = self.get_dpi_scale();
+            let margin = (10.0 * dpi_scale) as i32;
+            let caret_offset = (4.0 * dpi_scale) as i32;
+
             let mut rect = RECT::default();
             GetWindowRect(self.hwnd, &mut rect).ok();
             let bh = rect.bottom - rect.top;
 
-            let mut y = phys_pt.y + 4;
+            let mut y = phys_pt.y + caret_offset;
 
             let pt = POINT { x: phys_pt.x, y: phys_pt.y };
             let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
@@ -650,12 +656,11 @@ impl BubbleWindow {
             };
             let _ = GetMonitorInfoW(hmon, &mut mi);
 
-            const MARGIN: i32 = 10;
-            if y + bh > mi.rcWork.bottom - MARGIN {
-                y = phys_pt.y - bh - 4;
+            if y + bh > mi.rcWork.bottom - margin {
+                y = phys_pt.y - bh - caret_offset;
             }
-            if y < mi.rcWork.top + MARGIN {
-                y = mi.rcWork.top + MARGIN;
+            if y < mi.rcWork.top + margin {
+                y = mi.rcWork.top + margin;
             }
             y
         }
