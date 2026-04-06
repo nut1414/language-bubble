@@ -13,26 +13,36 @@ jobs:
     runs-on: windows-latest
     strategy:
       matrix:
-        rid: [win-x64, win-arm64]
+        include:
+          - target: x86_64-pc-windows-msvc
+            artifact: LanguageBubble-win-x64
+          - target: aarch64-pc-windows-msvc
+            artifact: LanguageBubble-win-arm64
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-dotnet@v4
+      - uses: dtolnay/rust-toolchain@stable
         with:
-          dotnet-version: '9.0.x'
+          targets: ${{ matrix.target }}
 
-      - name: Publish
-        run: dotnet publish LanguageBubble/LanguageBubble.csproj -c Release -r ${{ matrix.rid }}
+      - name: Build
+        working-directory: LanguageBubble
+        run: cargo build --release --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: ""
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: link.exe
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: ""
 
       - name: Rename artifact
         run: |
-          Copy-Item "LanguageBubble/bin/Release/net9.0-windows/${{ matrix.rid }}/publish/LanguageBubble.exe" "LanguageBubble-${{ matrix.rid }}.exe"
+          Copy-Item "LanguageBubble/target/${{ matrix.target }}/release/language-bubble.exe" "${{ matrix.artifact }}.exe"
         shell: pwsh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: LanguageBubble-${{ matrix.rid }}
-          path: LanguageBubble-${{ matrix.rid }}.exe
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.exe
 
   release:
     needs: build
