@@ -32,6 +32,9 @@ struct AppState {
     caps_lock_mode: SwitchMode,
     win_space_mode: SwitchMode,
     alt_shift_mode: SwitchMode,
+    caps_lock_display: DisplayMode,
+    win_space_display: DisplayMode,
+    alt_shift_display: DisplayMode,
     hide_on_typing: bool,
     expanded_mru_only: bool,
     is_switching: bool,
@@ -75,10 +78,14 @@ fn main() {
     };
 
     settings::migrate_old_settings();
+    settings::migrate_display_mode_settings();
 
     let caps_lock_mode = settings::get_key_mode("CapsLockMode", SwitchMode::AllLanguage);
     let win_space_mode = settings::get_key_mode("WinSpaceMode", SwitchMode::Unused);
     let alt_shift_mode = settings::get_key_mode("AltShiftMode", SwitchMode::Unused);
+    let caps_lock_display = settings::get_key_display_mode("CapsLockDisplayMode", DisplayMode::Carousel);
+    let win_space_display = settings::get_key_display_mode("WinSpaceDisplayMode", DisplayMode::Carousel);
+    let alt_shift_display = settings::get_key_display_mode("AltShiftDisplayMode", DisplayMode::Carousel);
     let hide_on_typing = settings::get_hide_on_typing();
     let expanded_mru_only = settings::get_expanded_mru_only();
 
@@ -95,7 +102,6 @@ fn main() {
     // Bubble window
     let mut bubble_win = bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
     bubble_win.set_size(settings::get_bubble_size());
-    bubble_win.display_mode = settings::get_display_mode();
 
     // Extract icon to temp file
     let icon_path = extract_icon();
@@ -120,6 +126,9 @@ fn main() {
             caps_lock_mode,
             win_space_mode,
             alt_shift_mode,
+            caps_lock_display,
+            win_space_display,
+            alt_shift_display,
             hide_on_typing,
             expanded_mru_only,
             is_switching: false,
@@ -273,6 +282,13 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
         return;
     }
 
+    // Set display mode for this key binding
+    state.bubble.display_mode = match combo {
+        HookKeyCombo::CapsLock => state.caps_lock_display,
+        HookKeyCombo::WinSpace => state.win_space_display,
+        HookKeyCombo::AltShift => state.alt_shift_display,
+    };
+
     // Ensure CapsLock stays off
     if combo == HookKeyCombo::CapsLock {
         capslock::ensure_caps_lock_off();
@@ -335,16 +351,18 @@ fn on_tray_right_click(hwnd: HWND) {
             state.language_service.get_current_layout().map(|l| l.hkl),
             settings::is_start_with_windows(),
             state.bubble.size,
-            state.bubble.display_mode,
             state.caps_lock_mode,
             state.win_space_mode,
             state.alt_shift_mode,
+            state.caps_lock_display,
+            state.win_space_display,
+            state.alt_shift_display,
             state.hide_on_typing,
             state.expanded_mru_only,
         )
     });
 
-    let Some((layouts, current_hkl, start_with_windows, size, display_mode, caps, winsp, altsh, hot, emru)) = data else {
+    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru)) = data else {
         return;
     };
 
@@ -354,10 +372,12 @@ fn on_tray_right_click(hwnd: HWND) {
         current_hkl,
         start_with_windows,
         size,
-        display_mode,
         caps,
         winsp,
         altsh,
+        caps_d,
+        winsp_d,
+        altsh_d,
         hot,
         emru,
     ) else {
@@ -397,16 +417,6 @@ fn handle_menu_command(cmd: u16) {
                 state.bubble.set_size(size);
                 settings::save_bubble_size(size);
             }
-            c if c >= tray::CMD_MODE_BASE && c < tray::CMD_MODE_BASE + 3 => {
-                let modes = [
-                    DisplayMode::Carousel,
-                    DisplayMode::Simple,
-                    DisplayMode::Expanded,
-                ];
-                let mode = modes[(c - tray::CMD_MODE_BASE) as usize];
-                state.bubble.display_mode = mode;
-                settings::save_display_mode(mode);
-            }
             c if c >= tray::CMD_KEY_CAPSLOCK_BASE && c < tray::CMD_KEY_CAPSLOCK_BASE + 3 => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_BASE) as usize);
                 state.caps_lock_mode = mode;
@@ -428,6 +438,21 @@ fn handle_menu_command(cmd: u16) {
                 hook::set_alt_shift_mode(mode);
                 settings::save_key_mode("AltShiftMode", mode);
             }
+            c if c >= tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE && c < tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3 => {
+                let mode = display_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE) as usize);
+                state.caps_lock_display = mode;
+                settings::save_key_display_mode("CapsLockDisplayMode", mode);
+            }
+            c if c >= tray::CMD_KEY_WINSPACE_DISPLAY_BASE && c < tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3 => {
+                let mode = display_mode_from_index((c - tray::CMD_KEY_WINSPACE_DISPLAY_BASE) as usize);
+                state.win_space_display = mode;
+                settings::save_key_display_mode("WinSpaceDisplayMode", mode);
+            }
+            c if c >= tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE && c < tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3 => {
+                let mode = display_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE) as usize);
+                state.alt_shift_display = mode;
+                settings::save_key_display_mode("AltShiftDisplayMode", mode);
+            }
             _ => {}
         }
     });
@@ -438,6 +463,14 @@ fn key_mode_from_index(i: usize) -> SwitchMode {
         0 => SwitchMode::AllLanguage,
         1 => SwitchMode::Mru,
         _ => SwitchMode::Unused,
+    }
+}
+
+fn display_mode_from_index(i: usize) -> DisplayMode {
+    match i {
+        0 => DisplayMode::Carousel,
+        1 => DisplayMode::Simple,
+        _ => DisplayMode::Expanded,
     }
 }
 

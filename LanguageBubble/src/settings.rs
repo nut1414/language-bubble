@@ -83,14 +83,16 @@ pub fn save_bubble_size(size: BubbleSize) {
     write_string(w!("Size"), size.as_str());
 }
 
-pub fn get_display_mode() -> DisplayMode {
-    read_string(w!("DisplayMode"))
+pub fn get_key_display_mode(key_name: &str, default: DisplayMode) -> DisplayMode {
+    let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
+    read_string(PCWSTR(wide.as_ptr()))
         .map(|s| DisplayMode::from_str(&s))
-        .unwrap_or(DisplayMode::Carousel)
+        .unwrap_or(default)
 }
 
-pub fn save_display_mode(mode: DisplayMode) {
-    write_string(w!("DisplayMode"), mode.as_str());
+pub fn save_key_display_mode(key_name: &str, mode: DisplayMode) {
+    let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
+    write_string(PCWSTR(wide.as_ptr()), mode.as_str());
 }
 
 pub fn get_hide_on_typing() -> bool {
@@ -181,4 +183,18 @@ pub fn migrate_old_settings() {
             let _ = RegCloseKey(hkey);
         }
     }
+}
+
+pub fn migrate_display_mode_settings() {
+    // Check if already migrated
+    if read_string(w!("CapsLockDisplayMode")).is_some() {
+        return;
+    }
+    // Copy old global DisplayMode to all three per-key settings
+    let mode = read_string(w!("DisplayMode"))
+        .map(|s| DisplayMode::from_str(&s))
+        .unwrap_or(DisplayMode::Carousel);
+    write_string(w!("CapsLockDisplayMode"), mode.as_str());
+    write_string(w!("WinSpaceDisplayMode"), mode.as_str());
+    write_string(w!("AltShiftDisplayMode"), mode.as_str());
 }

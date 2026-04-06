@@ -16,12 +16,14 @@ pub const CMD_EXPANDED_MRU_ONLY: u16 = 1003;
 
 // Size: 1100-1104
 pub const CMD_SIZE_BASE: u16 = 1100;
-// Display mode: 1200-1202
-pub const CMD_MODE_BASE: u16 = 1200;
-// Key bindings: CapsLock 1300-1302, WinSpace 1310-1312, AltShift 1320-1322
+// Key bindings switch mode: CapsLock 1300-1302, WinSpace 1310-1312, AltShift 1320-1322
 pub const CMD_KEY_CAPSLOCK_BASE: u16 = 1300;
 pub const CMD_KEY_WINSPACE_BASE: u16 = 1310;
 pub const CMD_KEY_ALTSHIFT_BASE: u16 = 1320;
+// Key bindings display mode: CapsLock 1330-1332, WinSpace 1340-1342, AltShift 1350-1352
+pub const CMD_KEY_CAPSLOCK_DISPLAY_BASE: u16 = 1330;
+pub const CMD_KEY_WINSPACE_DISPLAY_BASE: u16 = 1340;
+pub const CMD_KEY_ALTSHIFT_DISPLAY_BASE: u16 = 1350;
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -100,10 +102,12 @@ pub fn show_context_menu(
     current_hkl: Option<windows::Win32::UI::Input::KeyboardAndMouse::HKL>,
     start_with_windows: bool,
     size: crate::types::BubbleSize,
-    display_mode: crate::types::DisplayMode,
     caps_lock_mode: crate::types::SwitchMode,
     win_space_mode: crate::types::SwitchMode,
     alt_shift_mode: crate::types::SwitchMode,
+    caps_lock_display: crate::types::DisplayMode,
+    win_space_display: crate::types::DisplayMode,
+    alt_shift_display: crate::types::DisplayMode,
     hide_on_typing: bool,
     expanded_mru_only: bool,
 ) -> Option<u16> {
@@ -147,33 +151,20 @@ pub fn show_context_menu(
         }
         let _ = AppendMenuW(menu, MF_POPUP, size_menu.0 as usize, w!("Size"));
 
-        // Display Mode submenu
-        let mode_menu = CreatePopupMenu().ok()?;
-        let modes = [
-            ("Carousel", crate::types::DisplayMode::Carousel),
-            ("Simple", crate::types::DisplayMode::Simple),
-            ("Show All Languages", crate::types::DisplayMode::Expanded),
-        ];
-        for (i, (label, m)) in modes.iter().enumerate() {
-            let flags = MF_STRING | if *m == display_mode { MF_CHECKED } else { MF_UNCHECKED };
-            let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(mode_menu, flags, (CMD_MODE_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
-        }
-        let _ = AppendMenuW(mode_menu, MF_SEPARATOR, 0, None);
-        let mru_flags = MF_STRING | if expanded_mru_only { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(mode_menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
-        let _ = AppendMenuW(menu, MF_POPUP, mode_menu.0 as usize, w!("Display Mode"));
-
-        // Key Bindings submenu
+        // Key Bindings submenu (now includes display mode per key)
         let key_menu = CreatePopupMenu().ok()?;
-        add_key_submenu(key_menu, "CapsLock", CMD_KEY_CAPSLOCK_BASE, caps_lock_mode);
-        add_key_submenu(key_menu, "Win + Space", CMD_KEY_WINSPACE_BASE, win_space_mode);
-        add_key_submenu(key_menu, "Alt + Shift", CMD_KEY_ALTSHIFT_BASE, alt_shift_mode);
+        add_key_submenu(key_menu, "CapsLock", CMD_KEY_CAPSLOCK_BASE, caps_lock_mode, CMD_KEY_CAPSLOCK_DISPLAY_BASE, caps_lock_display);
+        add_key_submenu(key_menu, "Win + Space", CMD_KEY_WINSPACE_BASE, win_space_mode, CMD_KEY_WINSPACE_DISPLAY_BASE, win_space_display);
+        add_key_submenu(key_menu, "Alt + Shift", CMD_KEY_ALTSHIFT_BASE, alt_shift_mode, CMD_KEY_ALTSHIFT_DISPLAY_BASE, alt_shift_display);
         let _ = AppendMenuW(menu, MF_POPUP, key_menu.0 as usize, w!("Key Bindings"));
 
         // Hide on typing
         let hot_flags = MF_STRING | if hide_on_typing { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, hot_flags, CMD_HIDE_ON_TYPING as usize, w!("Hide on Typing"));
+
+        // Show Only Recent Languages (for Expanded mode)
+        let mru_flags = MF_STRING | if expanded_mru_only { MF_CHECKED } else { MF_UNCHECKED };
+        let _ = AppendMenuW(menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
@@ -205,21 +196,37 @@ pub fn show_context_menu(
 unsafe fn add_key_submenu(
     parent: HMENU,
     label: &str,
-    base_cmd: u16,
-    current: crate::types::SwitchMode,
+    switch_base_cmd: u16,
+    current_switch: crate::types::SwitchMode,
+    display_base_cmd: u16,
+    current_display: crate::types::DisplayMode,
 ) {
     unsafe {
         let sub = CreatePopupMenu().unwrap();
-        let mode_labels = [
+        let switch_labels = [
             ("Cycle All Languages", crate::types::SwitchMode::AllLanguage),
             ("Recent and English", crate::types::SwitchMode::Mru),
             ("Do Not Intercept", crate::types::SwitchMode::Unused),
         ];
-        for (i, (ml, mv)) in mode_labels.iter().enumerate() {
-            let flags = MF_STRING | if *mv == current { MF_CHECKED } else { MF_UNCHECKED };
+        for (i, (ml, mv)) in switch_labels.iter().enumerate() {
+            let flags = MF_STRING | if *mv == current_switch { MF_CHECKED } else { MF_UNCHECKED };
             let wide: Vec<u16> = ml.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(sub, flags, (base_cmd + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(sub, flags, (switch_base_cmd + i as u16) as usize, PCWSTR(wide.as_ptr()));
         }
+
+        let _ = AppendMenuW(sub, MF_SEPARATOR, 0, None);
+
+        let display_labels = [
+            ("Carousel", crate::types::DisplayMode::Carousel),
+            ("Simple", crate::types::DisplayMode::Simple),
+            ("Show All Languages", crate::types::DisplayMode::Expanded),
+        ];
+        for (i, (ml, mv)) in display_labels.iter().enumerate() {
+            let flags = MF_STRING | if *mv == current_display { MF_CHECKED } else { MF_UNCHECKED };
+            let wide: Vec<u16> = ml.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(sub, flags, (display_base_cmd + i as u16) as usize, PCWSTR(wide.as_ptr()));
+        }
+
         let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = AppendMenuW(parent, MF_POPUP, sub.0 as usize, PCWSTR(wide.as_ptr()));
     }
