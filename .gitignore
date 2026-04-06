@@ -14,6 +14,7 @@ obj/
 x64/
 x86/
 [Bb]uild[Ll]og.*
+*.Backup.tmp
 
 ## NuGet
 **/[Pp]ackages/*
@@ -30,6 +31,15 @@ bld/
 [Ll]og/
 [Ll]ogs/
 
+## MSIX / WAP packaging output
+AppPackages/
+BundleArtifacts/
+*.assets.cache
+
+## Certificates — never commit private keys
+*.pfx
+*.cer
+
 ## OS files
 Thumbs.db
 ehthumbs.db
@@ -39,3 +49,6 @@ Desktop.ini
 ## Rider / JetBrains
 .idea/
 *.sln.iml
+
+## Claude Code
+.claude/

@@ -183,7 +183,8 @@ public partial class BubbleWindow : Window
             selectedIndex = 0;
 
         bool canSlide = _previousSelectedIndex >= 0
-            && _previousSelectedIndex != selectedIndex && _labels.Count > 1;
+            && _previousSelectedIndex != selectedIndex && _labels.Count > 1
+            && caretPhysical.HasValue;
 
         if (CurrentDisplayMode == DisplayMode.Expanded && _labels.Count > 1)
         {

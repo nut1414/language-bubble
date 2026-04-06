@@ -34,7 +34,13 @@ internal static class CaretPositionService
             return result;
         }
 
-        // Strategy 3: UI Automation TextPattern (Office, Edge)
+        // Strategy 3: COM UIA ITextPattern2.GetCaretRange (Explorer, modern XAML controls)
+        // Uses the COM API directly because the .NET wrapper does not expose GetCaretRange.
+        result = ComUiaCaretHelper.TryGetCaret();
+        if (result.HasValue)
+            return result;
+
+        // Strategy 4: .NET UI Automation TextPattern (Office, Edge)
         // Isolated in a separate class so the heavy System.Windows.Automation
         // assemblies are only loaded when this fallback is actually needed.
         result = UIAutomationCaretHelper.TryGetCaret();
