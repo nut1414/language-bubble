@@ -182,7 +182,7 @@ public partial class BubbleWindow : Window
         if (selectedIndex < 0 || selectedIndex >= _labels.Count)
             selectedIndex = 0;
 
-        bool canSlide = caretPhysical.HasValue && _previousSelectedIndex >= 0
+        bool canSlide = _previousSelectedIndex >= 0
             && _previousSelectedIndex != selectedIndex && _labels.Count > 1;
 
         if (CurrentDisplayMode == DisplayMode.Expanded && _labels.Count > 1)
@@ -194,22 +194,30 @@ public partial class BubbleWindow : Window
             CarouselCanvas.Width = totalWidth;
             CarouselCanvas.Height = _itemHeight;
             Width = totalWidth + 16 + 1;
-            Height = _itemHeight + OuterBorder.Padding.Top + OuterBorder.Padding.Bottom + 1;
 
             // Row stays at origin — all items visible
-            RowTranslate.X = 0;
             RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+            RowTranslate.X = 0;
+
+            // Update label opacities
+            for (int i = 0; i < _labels.Count; i++)
+            {
+                _labels[i].BeginAnimation(OpacityProperty, null);
+                _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
+            }
+
+            Opacity = 0;
+            Show();
+            UpdateLayout();
+
+            if (caretPhysical.HasValue)
+                PositionAtCaretExpanded(caretPhysical.Value, selectedIndex);
+            else
+                CenterOnScreen();
 
             if (canSlide)
             {
-                // Bubble is already visible — cancel any fade-out, stay visible
-                BeginAnimation(OpacityProperty, null);
                 Opacity = 1;
-
-                if (caretPhysical.HasValue)
-                    PositionAtCaretExpanded(caretPhysical.Value, selectedIndex);
-                else
-                    CenterOnScreen();
 
                 int targetX = _desiredPhysX;
                 int startX;
@@ -236,52 +244,32 @@ public partial class BubbleWindow : Window
                 SetPhysicalPosition(hwnd, startX, _desiredPhysY);
                 AnimateWindowSlide(startX, targetX);
 
-                // Animate label opacities (from current, not snapped)
+                // Animate label opacities
                 if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
                 {
                     var prevLabel = _labels[_previousSelectedIndex];
+                    double curOp = prevLabel.Opacity;
+                    prevLabel.BeginAnimation(OpacityProperty, null);
+                    prevLabel.Opacity = curOp;
                     prevLabel.BeginAnimation(OpacityProperty,
-                        new DoubleAnimation(prevLabel.Opacity, 0.3, TimeSpan.FromMilliseconds(200)));
+                        new DoubleAnimation(curOp, 0.3, TimeSpan.FromMilliseconds(200)));
                 }
                 {
                     var newLabel = _labels[selectedIndex];
+                    double curOp = newLabel.Opacity;
+                    newLabel.BeginAnimation(OpacityProperty, null);
+                    newLabel.Opacity = curOp;
                     newLabel.BeginAnimation(OpacityProperty,
-                        new DoubleAnimation(newLabel.Opacity, 1.0, TimeSpan.FromMilliseconds(200)));
+                        new DoubleAnimation(curOp, 1.0, TimeSpan.FromMilliseconds(200)));
                 }
             }
             else
             {
-                // Set base values BEFORE clearing animations
-                for (int i = 0; i < _labels.Count; i++)
+                var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
                 {
-                    _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
-                    _labels[i].BeginAnimation(OpacityProperty, null);
-                }
-
-                if (IsVisible)
-                {
-                    // Already visible — just snap, no flash
-                    Opacity = 1;
-                    BeginAnimation(OpacityProperty, null);
-                }
-                else
-                {
-                    // First show — position and fade in
-                    Opacity = 0;
-                    Show();
-                    UpdateLayout();
-
-                    if (caretPhysical.HasValue)
-                        PositionAtCaretExpanded(caretPhysical.Value, selectedIndex);
-                    else
-                        CenterOnScreen();
-
-                    var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
-                    {
-                        EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                    };
-                    BeginAnimation(OpacityProperty, fadeIn);
-                }
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                BeginAnimation(OpacityProperty, fadeIn);
             }
         }
         else if (CurrentDisplayMode == DisplayMode.Carousel && _labels.Count > 1)
@@ -293,18 +281,35 @@ public partial class BubbleWindow : Window
             CarouselCanvas.Width = _itemWidth;
             CarouselCanvas.Height = _itemHeight;
             Width = _itemWidth + 16 + 1;
-            Height = _itemHeight + OuterBorder.Padding.Top + OuterBorder.Padding.Bottom + 1;
+
+            // Show window first so we can animate
+            Opacity = 0;
+            Show();
+            UpdateLayout();
+
+            if (caretPhysical.HasValue)
+                PositionAtCaret(caretPhysical.Value);
+            else
+                CenterOnScreen();
+
+            // Update label opacities — clear leftover animations first
+            for (int i = 0; i < _labels.Count; i++)
+            {
+                _labels[i].BeginAnimation(OpacityProperty, null);
+                _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
+            }
 
             double targetX = -selectedIndex * _itemWidth;
 
             if (canSlide)
             {
-                // Bubble is already visible — cancel any fade-out, stay visible
-                BeginAnimation(OpacityProperty, null);
+                // Already visible — just slide
                 Opacity = 1;
 
                 // Animate the row position from current to target
                 double currentX = RowTranslate.X;
+                RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+                RowTranslate.X = currentX;
                 var slideAnim = new DoubleAnimation
                 {
                     From = currentX,
@@ -318,54 +323,34 @@ public partial class BubbleWindow : Window
                 if (_previousSelectedIndex >= 0 && _previousSelectedIndex < _labels.Count)
                 {
                     var prevLabel = _labels[_previousSelectedIndex];
+                    double curOp = prevLabel.Opacity;
+                    prevLabel.BeginAnimation(OpacityProperty, null);
+                    prevLabel.Opacity = curOp;
                     prevLabel.BeginAnimation(OpacityProperty,
-                        new DoubleAnimation(prevLabel.Opacity, 0.3, TimeSpan.FromMilliseconds(200)));
+                        new DoubleAnimation(curOp, 0.3, TimeSpan.FromMilliseconds(200)));
                 }
 
                 // Animate new selected label brightening
                 {
                     var newLabel = _labels[selectedIndex];
+                    double curOp = newLabel.Opacity;
+                    newLabel.BeginAnimation(OpacityProperty, null);
+                    newLabel.Opacity = curOp;
                     newLabel.BeginAnimation(OpacityProperty,
-                        new DoubleAnimation(newLabel.Opacity, 1.0, TimeSpan.FromMilliseconds(200)));
+                        new DoubleAnimation(curOp, 1.0, TimeSpan.FromMilliseconds(200)));
                 }
             }
             else
             {
-                // Set base values BEFORE clearing animations to avoid
-                // a visible snap to the stale base value.
-                for (int i = 0; i < _labels.Count; i++)
-                {
-                    _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.3;
-                    _labels[i].BeginAnimation(OpacityProperty, null);
-                }
-
-                RowTranslate.X = targetX;
+                // First show or no slide — snap to position and fade in
                 RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+                RowTranslate.X = targetX;
 
-                if (IsVisible)
+                var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
                 {
-                    // Already visible — just snap, no flash
-                    Opacity = 1;
-                    BeginAnimation(OpacityProperty, null);
-                }
-                else
-                {
-                    // First show — position and fade in
-                    Opacity = 0;
-                    Show();
-                    UpdateLayout();
-
-                    if (caretPhysical.HasValue)
-                        PositionAtCaret(caretPhysical.Value);
-                    else
-                        CenterOnScreen();
-
-                    var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
-                    {
-                        EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                    };
-                    BeginAnimation(OpacityProperty, fadeIn);
-                }
+                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+                };
+                BeginAnimation(OpacityProperty, fadeIn);
             }
         }
         else
@@ -375,42 +360,31 @@ public partial class BubbleWindow : Window
             CarouselCanvas.Width = _itemWidth;
             CarouselCanvas.Height = _itemHeight;
             Width = _itemWidth + 28 + 1;
-            Height = _itemHeight + OuterBorder.Padding.Top + OuterBorder.Padding.Bottom + 1;
 
-            // Set base values BEFORE clearing animations
+            // Show only selected label — clear any leftover animations first
             for (int i = 0; i < _labels.Count; i++)
             {
-                _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.0;
                 _labels[i].BeginAnimation(OpacityProperty, null);
+                _labels[i].Opacity = (i == selectedIndex) ? 1.0 : 0.0;
             }
 
-            RowTranslate.X = -selectedIndex * _itemWidth;
             RowTranslate.BeginAnimation(TranslateTransform.XProperty, null);
+            RowTranslate.X = -selectedIndex * _itemWidth;
 
-            if (IsVisible)
-            {
-                // Already visible — just snap, no flash
-                Opacity = 1;
-                BeginAnimation(OpacityProperty, null);
-            }
+            Opacity = 0;
+            Show();
+            UpdateLayout();
+
+            if (caretPhysical.HasValue)
+                PositionAtCaret(caretPhysical.Value);
             else
+                CenterOnScreen();
+
+            var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
             {
-                // First show — position and fade in
-                Opacity = 0;
-                Show();
-                UpdateLayout();
-
-                if (caretPhysical.HasValue)
-                    PositionAtCaret(caretPhysical.Value);
-                else
-                    CenterOnScreen();
-
-                var fadeIn = new DoubleAnimation(0, 1, TimeSpan.FromMilliseconds(150))
-                {
-                    EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
-                };
-                BeginAnimation(OpacityProperty, fadeIn);
-            }
+                EasingFunction = new CubicEase { EasingMode = EasingMode.EaseOut }
+            };
+            BeginAnimation(OpacityProperty, fadeIn);
         }
 
         _previousSelectedIndex = selectedIndex;
@@ -670,8 +644,6 @@ public partial class BubbleWindow : Window
         BeginAnimation(OpacityProperty, null);
         Opacity = 0;
         Hide();
-        _previousSelectedIndex = -1;
-        _slideInProgress = false;
     }
 
     private void OnHideTimerTick(object? sender, EventArgs e)
@@ -693,8 +665,6 @@ public partial class BubbleWindow : Window
     private void OnFadeOutCompleted(object? sender, EventArgs e)
     {
         _topmostTimer.Stop();
-        _previousSelectedIndex = -1;
-        _slideInProgress = false;
         Hide();
 
         // Return memory to the OS — .NET GC holds committed pages by default.
