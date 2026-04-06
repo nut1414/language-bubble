@@ -4,7 +4,8 @@
       "Bash(dotnet new:*)",
       "Bash(dotnet sln:*)",
       "Bash(dotnet publish:*)",
-      "Bash(dotnet build:*)"
+      "Bash(dotnet build:*)",
+      "Bash(python3 -c:*)"
     ]
   }
 }
