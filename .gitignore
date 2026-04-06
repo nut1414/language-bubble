@@ -1,40 +1,11 @@
-## .NET
-bin/
-obj/
-*.user
-*.suo
-*.userosscache
-*.sln.docstates
+## Rust
+target/
 
 ## Visual Studio
 .vs/
 *.rsuser
-[Dd]ebug/
-[Rr]elease/
-x64/
-x86/
-[Bb]uild[Ll]og.*
-*.Backup.tmp
-
-## NuGet
-**/[Pp]ackages/*
-!**/[Pp]ackages/build/
-*.nupkg
-**/packages/repositories.config
-
-## Build results
-[Dd]ebugPublic/
-[Rr]eleases/
-[Aa][Rr][Mm]/
-[Aa][Rr][Mm]64/
-bld/
-[Ll]og/
-[Ll]ogs/
-
-## MSIX / WAP packaging output
-AppPackages/
-BundleArtifacts/
-*.assets.cache
+*.user
+*.suo
 
 ## Certificates — never commit private keys
 *.pfx
@@ -49,6 +20,9 @@ Desktop.ini
 ## Rider / JetBrains
 .idea/
 *.sln.iml
+
+## MSIX packaging project
+LanguageBubble.Package/
 
 ## Claude Code
 .claude/
