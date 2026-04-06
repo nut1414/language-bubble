@@ -7,7 +7,6 @@
         ShowInTaskbar="False"
         ShowActivated="False"
         ResizeMode="NoResize"
-        SizeToContent="Height"
         Opacity="0">
 
     <Window.Resources>
