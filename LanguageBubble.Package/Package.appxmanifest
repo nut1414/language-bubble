@@ -27,8 +27,8 @@
 
   <Applications>
     <Application Id="App"
-      Executable="$targetnametoken$.exe"
-      EntryPoint="$targetentrypoint$">
+      Executable="language-bubble.exe"
+      EntryPoint="Windows.FullTrustApplication">
       <uap:VisualElements
         DisplayName="Language Bubble"
         Description="Language Bubble — an assistive overlay for language learners."
