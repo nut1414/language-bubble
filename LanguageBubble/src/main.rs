@@ -115,11 +115,8 @@ fn main() {
     let mut bubble_win = bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
     bubble_win.set_size(settings::get_bubble_size());
 
-    // Extract icon to temp file
-    let icon_path = extract_icon();
-
     // Tray icon
-    let tray_icon = tray::TrayIcon::create(msg_hwnd, icon_path.as_deref());
+    let tray_icon = tray::TrayIcon::create(msg_hwnd);
 
     // Install keyboard hook
     hook::install(msg_hwnd, caps_lock_mode, win_space_mode, alt_shift_mode);
@@ -163,10 +160,6 @@ fn main() {
         *cell.borrow_mut() = None;
     });
 
-    // Delete temp icon
-    if let Some(ref path) = icon_path {
-        let _ = std::fs::remove_file(path);
-    }
 }
 
 fn create_msg_window() -> HWND {
@@ -486,15 +479,3 @@ fn display_mode_from_index(i: usize) -> DisplayMode {
     }
 }
 
-fn extract_icon() -> Option<String> {
-    let exe = std::env::current_exe().ok()?;
-    let ico_path = exe.with_extension("ico");
-    if ico_path.exists() {
-        return Some(ico_path.to_string_lossy().to_string());
-    }
-    let res_ico = exe.parent()?.join("resources").join("app.ico");
-    if res_ico.exists() {
-        return Some(res_ico.to_string_lossy().to_string());
-    }
-    None
-}

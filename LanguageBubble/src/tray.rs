@@ -2,6 +2,7 @@ use std::mem;
 
 use windows::core::*;
 use windows::Win32::Foundation::*;
+use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
@@ -31,10 +32,8 @@ pub struct TrayIcon {
 }
 
 impl TrayIcon {
-    pub fn create(hwnd: HWND, icon_path: Option<&str>) -> Self {
-        let h_icon = icon_path
-            .and_then(|path| load_icon_from_file(path))
-            .unwrap_or(HICON::default());
+    pub fn create(hwnd: HWND) -> Self {
+        let h_icon = load_embedded_icon().unwrap_or(HICON::default());
 
         let mut nid = NOTIFYICONDATAW {
             cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -80,16 +79,16 @@ impl Drop for TrayIcon {
     }
 }
 
-fn load_icon_from_file(path: &str) -> Option<HICON> {
-    let wide: Vec<u16> = path.encode_utf16().chain(std::iter::once(0)).collect();
+fn load_embedded_icon() -> Option<HICON> {
     unsafe {
+        let hinstance = GetModuleHandleW(None).ok()?;
         let h = LoadImageW(
-            None,
-            PCWSTR(wide.as_ptr()),
+            Some(hinstance.into()),
+            PCWSTR(1 as *const u16), // resource ID 1 (winres default)
             IMAGE_ICON,
             0,
             0,
-            LR_LOADFROMFILE | LR_DEFAULTSIZE,
+            LR_DEFAULTSIZE,
         )
         .ok()?;
         Some(HICON(h.0))
