@@ -29,6 +29,9 @@ struct HookState {
     win_used_for_combo: bool,
     alt_held: bool,
     shift_held: bool,
+    space_held: bool,
+    caps_held: bool,
+    alt_shift_fired: bool,
 }
 
 thread_local! {
@@ -59,6 +62,9 @@ pub fn install(
             win_used_for_combo: false,
             alt_held: false,
             shift_held: false,
+            space_held: false,
+            caps_held: false,
+            alt_shift_fired: false,
         });
         HOOK.set(Some(Box::into_raw(state)));
     }
@@ -143,7 +149,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
     // --- Space (when Win held) ---
     if vk == VK_SPACE.0 && state.win_held && state.win_space_mode != SwitchMode::Unused {
-        if is_down {
+        if is_down && !state.space_held {
+            state.space_held = true;
             state.win_used_for_combo = true;
             let _ = PostMessageW(
                 Some(state.target_hwnd),
@@ -151,6 +158,8 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                 WPARAM(HookKeyCombo::WinSpace as usize),
                 LPARAM(0),
             );
+        } else if is_up {
+            state.space_held = false;
         }
         return LRESULT(1); // Suppress both down and up
     }
@@ -158,8 +167,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     // --- Alt key ---
     if vk == VK_LMENU.0 || vk == VK_RMENU.0 || vk == VK_MENU.0 {
         if is_down {
+            let was_held = state.alt_held;
             state.alt_held = true;
-            if state.shift_held && state.alt_shift_mode != SwitchMode::Unused {
+            if !was_held && state.shift_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
+                state.alt_shift_fired = true;
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
@@ -170,6 +181,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             }
         } else if is_up {
             state.alt_held = false;
+            state.alt_shift_fired = false;
             // Always pass through Alt key-up to prevent stuck key
         }
         return CallNextHookEx(None, code, wparam, lparam);
@@ -178,8 +190,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     // --- Shift key ---
     if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 || vk == VK_SHIFT.0 {
         if is_down {
+            let was_held = state.shift_held;
             state.shift_held = true;
-            if state.alt_held && state.alt_shift_mode != SwitchMode::Unused {
+            if !was_held && state.alt_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
+                state.alt_shift_fired = true;
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
@@ -190,6 +204,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
             }
         } else if is_up {
             state.shift_held = false;
+            state.alt_shift_fired = false;
             // Always pass through Shift key-up to prevent stuck key
         }
         return CallNextHookEx(None, code, wparam, lparam);
@@ -200,13 +215,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if state.caps_lock_mode == SwitchMode::Unused {
             return CallNextHookEx(None, code, wparam, lparam);
         }
-        if is_down {
+        if is_down && !state.caps_held {
+            state.caps_held = true;
             let _ = PostMessageW(
                 Some(state.target_hwnd),
                 WM_SWITCH_KEY,
                 WPARAM(HookKeyCombo::CapsLock as usize),
                 LPARAM(0),
             );
+        } else if is_up {
+            state.caps_held = false;
         }
         return LRESULT(1); // Suppress both down and up
     }
