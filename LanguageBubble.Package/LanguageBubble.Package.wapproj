@@ -114,7 +114,10 @@
   <ItemGroup>
     <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.1742" PrivateAssets="all" />
   </ItemGroup>
-  <ItemGroup>
-    <Content Include="..\LanguageBubble\target\release\language-bubble.exe" />
+  <ItemGroup Condition="'$(Platform)'=='x64'">
+    <Content Include="..\LanguageBubble\target\x86_64-pc-windows-msvc\release\language-bubble.exe" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(Platform)'=='ARM64'">
+    <Content Include="..\LanguageBubble\target\aarch64-pc-windows-msvc\release\language-bubble.exe" />
   </ItemGroup>
 </Project>
