@@ -529,7 +529,7 @@ impl BubbleWindow {
                 x = mi.rcWork.left + margin;
             }
             if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.y - bh - caret_offset; // flip above
+                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
             }
             if y < mi.rcWork.top + margin {
                 y = mi.rcWork.top + margin;
@@ -581,7 +581,7 @@ impl BubbleWindow {
                 x = mi.rcWork.left + margin;
             }
             if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.y - bh - caret_offset;
+                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
             }
             if y < mi.rcWork.top + margin {
                 y = mi.rcWork.top + margin;
@@ -657,7 +657,7 @@ impl BubbleWindow {
             let _ = GetMonitorInfoW(hmon, &mut mi);
 
             if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.y - bh - caret_offset;
+                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
             }
             if y < mi.rcWork.top + margin {
                 y = mi.rcWork.top + margin;

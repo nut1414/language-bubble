@@ -13,7 +13,8 @@ const OBJID_CARET: i32 = -8;
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenPoint {
     pub x: i32,
-    pub y: i32,
+    pub y: i32,         // caret bottom (for placing bubble below)
+    pub caret_top: i32, // caret top (for placing bubble above)
 }
 
 pub fn get_caret_screen_position() -> Option<ScreenPoint> {
@@ -62,20 +63,26 @@ fn try_gui_thread_info() -> Option<ScreenPoint> {
             x: gui.rcCaret.left,
             y: gui.rcCaret.bottom,
         };
+        let mut pt_top = POINT {
+            x: gui.rcCaret.left,
+            y: gui.rcCaret.top,
+        };
 
         // Match target window's DPI awareness for ClientToScreen
         let target_ctx = GetWindowDpiAwarenessContext(gui.hwndCaret);
         let prev_ctx = SetThreadDpiAwarenessContext(target_ctx);
         let ok = ClientToScreen(gui.hwndCaret, &mut pt);
+        let ok_top = ClientToScreen(gui.hwndCaret, &mut pt_top);
         SetThreadDpiAwarenessContext(prev_ctx);
-        if !ok.as_bool() {
+        if !ok.as_bool() || !ok_top.as_bool() {
             return None;
         }
 
         // Convert to physical pixels
         let _ = LogicalToPhysicalPointForPerMonitorDPI(Some(gui.hwndCaret), &mut pt);
+        let _ = LogicalToPhysicalPointForPerMonitorDPI(Some(gui.hwndCaret), &mut pt_top);
 
-        Some(ScreenPoint { x: pt.x, y: pt.y })
+        Some(ScreenPoint { x: pt.x, y: pt.y, caret_top: pt_top.y })
     }
 }
 
@@ -134,6 +141,7 @@ fn try_msaa_caret() -> Option<ScreenPoint> {
         Some(ScreenPoint {
             x: left,
             y: top + height,
+            caret_top: top,
         })
     }
 }
@@ -233,6 +241,7 @@ fn try_bounding_rect_fallback(element: &IUIAutomationElement) -> Option<ScreenPo
         Some(ScreenPoint {
             x: (x + w / 2.0) as i32,
             y: (y + h) as i32,
+            caret_top: y as i32,
         })
     }
 }
@@ -246,6 +255,7 @@ fn point_from_range(range: &IUIAutomationTextRange) -> Option<ScreenPoint> {
             return Some(ScreenPoint {
                 x: rects[0] as i32,
                 y: (rects[1] + rects[3]) as i32,
+                caret_top: rects[1] as i32,
             });
         }
 
@@ -258,6 +268,7 @@ fn point_from_range(range: &IUIAutomationTextRange) -> Option<ScreenPoint> {
             return Some(ScreenPoint {
                 x: rects[0] as i32,
                 y: (rects[1] + rects[3]) as i32,
+                caret_top: rects[1] as i32,
             });
         }
 
