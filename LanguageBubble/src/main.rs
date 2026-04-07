@@ -117,6 +117,10 @@ fn main() {
 
     // Tray icon
     let tray_icon = tray::TrayIcon::create(msg_hwnd);
+    tray_icon.show_balloon(
+        "Language Bubble",
+        "Running in the system tray. Right-click the tray icon to configure.",
+    );
 
     // Install keyboard hook
     hook::install(msg_hwnd, caps_lock_mode, win_space_mode, alt_shift_mode);
@@ -397,6 +401,18 @@ fn handle_menu_command(cmd: u16) {
         match cmd {
             tray::CMD_EXIT => {
                 unsafe { PostQuitMessage(0) };
+            }
+            tray::CMD_FEEDBACK => {
+                unsafe {
+                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                        None,
+                        w!("open"),
+                        w!("https://github.com/nut1414/language-bubble/issues"),
+                        None,
+                        None,
+                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    );
+                }
             }
             tray::CMD_START_WITH_WINDOWS => {
                 let current = settings::is_start_with_windows();

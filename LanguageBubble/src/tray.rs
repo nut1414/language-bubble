@@ -14,6 +14,7 @@ pub const CMD_EXIT: u16 = 1000;
 pub const CMD_START_WITH_WINDOWS: u16 = 1001;
 pub const CMD_HIDE_ON_TYPING: u16 = 1002;
 pub const CMD_EXPANDED_MRU_ONLY: u16 = 1003;
+pub const CMD_FEEDBACK: u16 = 1004;
 
 // Size: 1100-1104
 pub const CMD_SIZE_BASE: u16 = 1100;
@@ -55,6 +56,29 @@ impl TrayIcon {
         }
 
         TrayIcon { hwnd, h_icon }
+    }
+
+    pub fn show_balloon(&self, title: &str, message: &str) {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ICON_ID,
+            uFlags: NIF_INFO,
+            ..Default::default()
+        };
+        nid.dwInfoFlags = NIIF_INFO;
+
+        let msg_wide: Vec<u16> = message.encode_utf16().collect();
+        let msg_len = msg_wide.len().min(nid.szInfo.len() - 1);
+        nid.szInfo[..msg_len].copy_from_slice(&msg_wide[..msg_len]);
+
+        let title_wide: Vec<u16> = title.encode_utf16().collect();
+        let title_len = title_wide.len().min(nid.szInfoTitle.len() - 1);
+        nid.szInfoTitle[..title_len].copy_from_slice(&title_wide[..title_len]);
+
+        unsafe {
+            let _ = Shell_NotifyIconW(NIM_MODIFY, &nid);
+        }
     }
 
     pub fn remove(&self) {
@@ -125,6 +149,7 @@ pub fn show_context_menu(
             if current_hkl.is_some_and(|h| h == layout.hkl) {
                 flags |= MF_CHECKED;
             }
+            flags |= MF_DISABLED;
             let _ = AppendMenuW(menu, flags, 0, PCWSTR(wide.as_ptr()));
         }
 
@@ -166,6 +191,9 @@ pub fn show_context_menu(
         let _ = AppendMenuW(menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+
+        // Feedback
+        let _ = AppendMenuW(menu, MF_STRING, CMD_FEEDBACK as usize, w!("Feedback"));
 
         // Exit
         let _ = AppendMenuW(menu, MF_STRING, CMD_EXIT as usize, w!("Exit"));
