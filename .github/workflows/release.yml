@@ -30,9 +30,9 @@ jobs:
         run: cargo build --release --target ${{ matrix.target }}
         env:
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
-          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: ""
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
           CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: link.exe
-          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: ""
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
 
       - name: Rename artifact
         run: |

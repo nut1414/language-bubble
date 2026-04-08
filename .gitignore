@@ -1,3 +1,9 @@
+*.msix
+*.msixupload
+*.msixbundle
+
+Package.appxmanifest
+
 ## Rust
 target/
 
