@@ -1,4 +1,5 @@
 use windows::core::{w, PCWSTR};
+use windows::ApplicationModel::{Package, StartupTask, StartupTaskState};
 use windows::Win32::System::Registry::*;
 
 use crate::types::*;
@@ -6,6 +7,11 @@ use crate::types::*;
 const SUBKEY: PCWSTR = w!("Software\\LanguageBubble");
 const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const APP_NAME: PCWSTR = w!("LanguageBubble");
+const STARTUP_TASK_ID: &str = "LanguageBubbleStartup";
+
+fn is_msix_packaged() -> bool {
+    Package::Current().is_ok()
+}
 
 fn read_string(key_name: PCWSTR) -> Option<String> {
     unsafe {
@@ -115,6 +121,46 @@ pub fn save_expanded_mru_only(enabled: bool) {
 }
 
 pub fn is_start_with_windows() -> bool {
+    if is_msix_packaged() {
+        is_start_with_windows_msix()
+    } else {
+        is_start_with_windows_registry()
+    }
+}
+
+pub fn set_start_with_windows(enable: bool) {
+    if is_msix_packaged() {
+        set_start_with_windows_msix(enable);
+    } else {
+        set_start_with_windows_registry(enable);
+    }
+}
+
+fn is_start_with_windows_msix() -> bool {
+    let Ok(task) = StartupTask::GetAsync(&STARTUP_TASK_ID.into()).and_then(|op| op.get()) else {
+        return false;
+    };
+    let Ok(state) = task.State() else {
+        return false;
+    };
+    matches!(
+        state,
+        StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy
+    )
+}
+
+fn set_start_with_windows_msix(enable: bool) {
+    let Ok(task) = StartupTask::GetAsync(&STARTUP_TASK_ID.into()).and_then(|op| op.get()) else {
+        return;
+    };
+    if enable {
+        let _ = task.RequestEnableAsync().and_then(|op| op.get());
+    } else {
+        let _ = task.Disable();
+    }
+}
+
+fn is_start_with_windows_registry() -> bool {
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_SUBKEY, Some(0), KEY_READ, &mut hkey).is_err() {
@@ -136,7 +182,7 @@ pub fn is_start_with_windows() -> bool {
     }
 }
 
-pub fn set_start_with_windows(enable: bool) {
+fn set_start_with_windows_registry(enable: bool) {
     unsafe {
         let mut hkey = HKEY::default();
         if RegOpenKeyExW(HKEY_CURRENT_USER, RUN_SUBKEY, Some(0), KEY_WRITE, &mut hkey).is_err() {
