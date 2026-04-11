@@ -26,6 +26,7 @@ features = [
     "Win32_System_Com",
     "Win32_System_Ole",
     "Win32_System_Variant",
+    "ApplicationModel",
 ]
 
 [build-dependencies]
