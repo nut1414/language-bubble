@@ -31,9 +31,7 @@ struct HookState {
     shift_held: bool,
     space_held: bool,
     caps_held: bool,
-    alt_shift_armed: bool,
-    win_space_armed: bool,
-    caps_armed: bool,
+    alt_shift_fired: bool,
 }
 
 thread_local! {
@@ -66,9 +64,7 @@ pub fn install(
             shift_held: false,
             space_held: false,
             caps_held: false,
-            alt_shift_armed: false,
-            win_space_armed: false,
-            caps_armed: false,
+            alt_shift_fired: false,
         });
         HOOK.set(Some(Box::into_raw(state)));
     }
@@ -135,25 +131,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     // --- Windows key ---
     if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
         if is_down {
-            // Gate behind !win_held so auto-repeat Win-down events don't clobber
-            // win_used_for_combo mid-combo (would re-open Start menu on release).
-            if !state.win_held {
-                state.win_held = true;
-                state.win_used_for_combo = false;
-            }
+            state.win_held = true;
+            state.win_used_for_combo = false;
         } else if is_up {
             state.win_held = false;
-            // If Space was pressed during this Win-hold and no other key intervened,
-            // fire the language switch on Win release too (user let Win go before Space).
-            if state.win_space_armed {
-                state.win_space_armed = false;
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::WinSpace as usize),
-                    LPARAM(0),
-                );
-            }
             if state.win_used_for_combo {
                 state.win_used_for_combo = false;
                 // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
@@ -171,21 +152,16 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down && !state.space_held {
             state.space_held = true;
             state.win_used_for_combo = true;
-            state.win_space_armed = true;
-            // Fire on release, not on press, so Win+Space+X does not trigger a switch.
+            let _ = PostMessageW(
+                Some(state.target_hwnd),
+                WM_SWITCH_KEY,
+                WPARAM(HookKeyCombo::WinSpace as usize),
+                LPARAM(0),
+            );
         } else if is_up {
             state.space_held = false;
-            if state.win_space_armed {
-                state.win_space_armed = false;
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::WinSpace as usize),
-                    LPARAM(0),
-                );
-            }
         }
-        return LRESULT(1); // Still suppress both down and up to prevent native Win+Space switcher
+        return LRESULT(1); // Suppress both down and up
     }
 
     // --- Alt key ---
@@ -193,22 +169,21 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down {
             let was_held = state.alt_held;
             state.alt_held = true;
-            if !was_held && state.shift_held && state.alt_shift_mode != SwitchMode::Unused {
-                state.alt_shift_armed = true;
-            }
-        } else if is_up {
-            state.alt_held = false;
-            if state.alt_shift_armed {
-                state.alt_shift_armed = false;
+            if !was_held && state.shift_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
+                state.alt_shift_fired = true;
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
                     WPARAM(HookKeyCombo::AltShift as usize),
                     LPARAM(0),
                 );
+                return LRESULT(1);
             }
+        } else if is_up {
+            state.alt_held = false;
+            state.alt_shift_fired = false;
+            // Always pass through Alt key-up to prevent stuck key
         }
-        // Always pass Alt through so other apps can handle Alt+Shift+X combos.
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
@@ -217,22 +192,21 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down {
             let was_held = state.shift_held;
             state.shift_held = true;
-            if !was_held && state.alt_held && state.alt_shift_mode != SwitchMode::Unused {
-                state.alt_shift_armed = true;
-            }
-        } else if is_up {
-            state.shift_held = false;
-            if state.alt_shift_armed {
-                state.alt_shift_armed = false;
+            if !was_held && state.alt_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
+                state.alt_shift_fired = true;
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
                     WPARAM(HookKeyCombo::AltShift as usize),
                     LPARAM(0),
                 );
+                return LRESULT(1);
             }
+        } else if is_up {
+            state.shift_held = false;
+            state.alt_shift_fired = false;
+            // Always pass through Shift key-up to prevent stuck key
         }
-        // Always pass Shift through so other apps can handle Alt+Shift+X combos.
         return CallNextHookEx(None, code, wparam, lparam);
     }
 
@@ -243,32 +217,20 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
         if is_down && !state.caps_held {
             state.caps_held = true;
-            state.caps_armed = true;
-            // Fire on release, not on press, so CapsLock+X does not trigger a switch.
+            let _ = PostMessageW(
+                Some(state.target_hwnd),
+                WM_SWITCH_KEY,
+                WPARAM(HookKeyCombo::CapsLock as usize),
+                LPARAM(0),
+            );
         } else if is_up {
             state.caps_held = false;
-            if state.caps_armed {
-                state.caps_armed = false;
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::CapsLock as usize),
-                    LPARAM(0),
-                );
-            }
         }
-        return LRESULT(1); // Still suppress both down and up to prevent native CapsLock toggle
+        return LRESULT(1); // Suppress both down and up
     }
 
     // --- All other keys ---
     if is_down {
-        // Any unrelated key-down cancels a pending combo: the user meant
-        // Alt+Shift+X / Win+Space+X / CapsLock+X, not a bare language-switch combo.
-        // Do NOT clear win_used_for_combo here — it must survive to suppress the
-        // Start menu on Win-up even if arming was cancelled.
-        state.alt_shift_armed = false;
-        state.win_space_armed = false;
-        state.caps_armed = false;
         let _ = PostMessageW(
             Some(state.target_hwnd),
             WM_ANY_KEY,
