@@ -31,7 +31,8 @@ struct HookState {
     shift_held: bool,
     space_held: bool,
     caps_held: bool,
-    alt_shift_fired: bool,
+    alt_shift_primed: bool,
+    alt_shift_consumed: bool,
 }
 
 thread_local! {
@@ -64,7 +65,8 @@ pub fn install(
             shift_held: false,
             space_held: false,
             caps_held: false,
-            alt_shift_fired: false,
+            alt_shift_primed: false,
+            alt_shift_consumed: false,
         });
         HOOK.set(Some(Box::into_raw(state)));
     }
@@ -152,6 +154,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down && !state.space_held {
             state.space_held = true;
             state.win_used_for_combo = true;
+            if state.alt_held && state.shift_held {
+                state.alt_shift_consumed = true;
+            }
             let _ = PostMessageW(
                 Some(state.target_hwnd),
                 WM_SWITCH_KEY,
@@ -169,20 +174,26 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down {
             let was_held = state.alt_held;
             state.alt_held = true;
-            if !was_held && state.shift_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
-                state.alt_shift_fired = true;
+            if !was_held && state.shift_held {
+                state.alt_shift_primed = true;
+                state.alt_shift_consumed = false;
+            }
+        } else if is_up {
+            state.alt_held = false;
+            if state.alt_shift_primed
+                && !state.alt_shift_consumed
+                && state.alt_shift_mode != SwitchMode::Unused
+            {
+                inject_ctrl_tap();
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
                     WPARAM(HookKeyCombo::AltShift as usize),
                     LPARAM(0),
                 );
-                return LRESULT(1);
             }
-        } else if is_up {
-            state.alt_held = false;
-            state.alt_shift_fired = false;
-            // Always pass through Alt key-up to prevent stuck key
+            state.alt_shift_primed = false;
+            state.alt_shift_consumed = false;
         }
         return CallNextHookEx(None, code, wparam, lparam);
     }
@@ -192,20 +203,26 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         if is_down {
             let was_held = state.shift_held;
             state.shift_held = true;
-            if !was_held && state.alt_held && !state.alt_shift_fired && state.alt_shift_mode != SwitchMode::Unused {
-                state.alt_shift_fired = true;
+            if !was_held && state.alt_held {
+                state.alt_shift_primed = true;
+                state.alt_shift_consumed = false;
+            }
+        } else if is_up {
+            state.shift_held = false;
+            if state.alt_shift_primed
+                && !state.alt_shift_consumed
+                && state.alt_shift_mode != SwitchMode::Unused
+            {
+                inject_ctrl_tap();
                 let _ = PostMessageW(
                     Some(state.target_hwnd),
                     WM_SWITCH_KEY,
                     WPARAM(HookKeyCombo::AltShift as usize),
                     LPARAM(0),
                 );
-                return LRESULT(1);
             }
-        } else if is_up {
-            state.shift_held = false;
-            state.alt_shift_fired = false;
-            // Always pass through Shift key-up to prevent stuck key
+            state.alt_shift_primed = false;
+            state.alt_shift_consumed = false;
         }
         return CallNextHookEx(None, code, wparam, lparam);
     }
@@ -217,6 +234,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
         if is_down && !state.caps_held {
             state.caps_held = true;
+            if state.alt_held && state.shift_held {
+                state.alt_shift_consumed = true;
+            }
             let _ = PostMessageW(
                 Some(state.target_hwnd),
                 WM_SWITCH_KEY,
@@ -231,6 +251,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
 
     // --- All other keys ---
     if is_down {
+        if state.alt_held && state.shift_held {
+            state.alt_shift_consumed = true;
+        }
         let _ = PostMessageW(
             Some(state.target_hwnd),
             WM_ANY_KEY,
