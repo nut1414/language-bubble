@@ -1,6 +1,6 @@
 ﻿<?xml version="1.0" encoding="utf-8"?>
 <Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10" xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10" xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities" xmlns:desktop="http://schemas.microsoft.com/appx/manifest/desktop/windows10" IgnorableNamespaces="uap rescap desktop">
-  <Identity Name="pannanap.LanguageBubble" Publisher="CN=A70410F5-DD32-4515-9AF6-ED44991B0F77" Version="0.3.3.0" ProcessorArchitecture="x64" />
+  <Identity Name="pannanap.LanguageBubble" Publisher="CN=A70410F5-DD32-4515-9AF6-ED44991B0F77" Version="0.3.4.0" ProcessorArchitecture="x64" />
   <Properties>
     <DisplayName>Language Bubble</DisplayName>
     <PublisherDisplayName>pannanap</PublisherDisplayName>
