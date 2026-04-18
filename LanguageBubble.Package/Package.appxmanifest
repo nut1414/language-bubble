@@ -18,12 +18,15 @@
         <uap:DefaultTile Wide310x150Logo="Images\Wide310x150Logo.png" />
         <uap:SplashScreen Image="Images\SplashScreen.png" />
       </uap:VisualElements>
+      <Extensions>
+        <desktop:Extension Category="windows.startupTask" Executable="language-bubble.exe" EntryPoint="Windows.FullTrustApplication">
+          <desktop:StartupTask TaskId="LanguageBubbleStartup" Enabled="false" DisplayName="Language Bubble" />
+        </desktop:Extension>
+      </Extensions>
     </Application>
   </Applications>
   <Capabilities>
     <Capability Name="internetClient" />
     <rescap:Capability Name="runFullTrust" />
-    <rescap:Capability Name="inputInjection" />
-    <rescap:Capability Name="uiAutomation" />
   </Capabilities>
 </Package>
