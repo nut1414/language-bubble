@@ -40,6 +40,8 @@ struct AppState {
     alt_shift_display: DisplayMode,
     hide_on_typing: bool,
     expanded_mru_only: bool,
+    theme_mode: ThemeMode,
+    custom_colors: CustomThemeColors,
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
 }
@@ -100,6 +102,8 @@ fn main() {
     let alt_shift_display = settings::get_key_display_mode("AltShiftDisplayMode", DisplayMode::Carousel);
     let hide_on_typing = settings::get_hide_on_typing();
     let expanded_mru_only = settings::get_expanded_mru_only();
+    let theme_mode = settings::get_theme_mode();
+    let custom_colors = settings::get_custom_theme_colors();
 
     // Create message-only window
     let msg_hwnd = create_msg_window();
@@ -114,6 +118,8 @@ fn main() {
     // Bubble window
     let mut bubble_win = bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
     bubble_win.set_size(settings::get_bubble_size());
+    bubble_win.set_theme_mode(theme_mode);
+    bubble_win.set_custom_colors(custom_colors);
 
     // Tray icon
     let tray_icon = tray::TrayIcon::create(msg_hwnd);
@@ -144,6 +150,8 @@ fn main() {
             alt_shift_display,
             hide_on_typing,
             expanded_mru_only,
+            theme_mode,
+            custom_colors,
             is_switching: false,
             pending_combo: None,
         });
@@ -368,10 +376,12 @@ fn on_tray_right_click(hwnd: HWND) {
             state.alt_shift_display,
             state.hide_on_typing,
             state.expanded_mru_only,
+            state.theme_mode,
+            state.custom_colors,
         )
     });
 
-    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru)) = data else {
+    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc)) = data else {
         return;
     };
 
@@ -389,14 +399,42 @@ fn on_tray_right_click(hwnd: HWND) {
         altsh_d,
         hot,
         emru,
+        theme,
+        &cc,
     ) else {
         return;
     };
 
-    handle_menu_command(cmd);
+    handle_menu_command(hwnd, cmd);
 }
 
-fn handle_menu_command(cmd: u16) {
+fn handle_menu_command(hwnd: HWND, cmd: u16) {
+    match cmd {
+        tray::CMD_CUSTOM_BG_COLOR => {
+            let initial = with_app(|state| state.custom_colors.bg_color).unwrap_or(0);
+            if let Some(new_color) = pick_color(hwnd, initial) {
+                with_app(|state| {
+                    state.custom_colors.bg_color = new_color;
+                    state.bubble.set_custom_colors(state.custom_colors);
+                    settings::save_custom_theme_colors(&state.custom_colors);
+                });
+            }
+            return;
+        }
+        tray::CMD_CUSTOM_FG_COLOR => {
+            let initial = with_app(|state| state.custom_colors.fg_color).unwrap_or(0x00FFFFFF);
+            if let Some(new_color) = pick_color(hwnd, initial) {
+                with_app(|state| {
+                    state.custom_colors.fg_color = new_color;
+                    state.bubble.set_custom_colors(state.custom_colors);
+                    settings::save_custom_theme_colors(&state.custom_colors);
+                });
+            }
+            return;
+        }
+        _ => {}
+    }
+
     with_app(|state| {
         match cmd {
             tray::CMD_EXIT => {
@@ -474,6 +512,19 @@ fn handle_menu_command(cmd: u16) {
                 state.alt_shift_display = mode;
                 settings::save_key_display_mode("AltShiftDisplayMode", mode);
             }
+            c if c >= tray::CMD_THEME_BASE && c < tray::CMD_THEME_BASE + 4 => {
+                let mode = theme_mode_from_index((c - tray::CMD_THEME_BASE) as usize);
+                state.theme_mode = mode;
+                state.bubble.set_theme_mode(mode);
+                settings::save_theme_mode(mode);
+            }
+            c if c >= tray::CMD_OPACITY_BASE && c < tray::CMD_OPACITY_BASE + 7 => {
+                let opacity_values: [u8; 7] = [64, 128, 191, 217, 230, 242, 255];
+                let idx = (c - tray::CMD_OPACITY_BASE) as usize;
+                state.custom_colors.opacity = opacity_values[idx];
+                state.bubble.set_custom_colors(state.custom_colors);
+                settings::save_custom_theme_colors(&state.custom_colors);
+            }
             _ => {}
         }
     });
@@ -492,6 +543,36 @@ fn display_mode_from_index(i: usize) -> DisplayMode {
         0 => DisplayMode::Carousel,
         1 => DisplayMode::Simple,
         _ => DisplayMode::Expanded,
+    }
+}
+
+fn theme_mode_from_index(i: usize) -> ThemeMode {
+    match i {
+        0 => ThemeMode::System,
+        1 => ThemeMode::Light,
+        2 => ThemeMode::Dark,
+        _ => ThemeMode::Custom,
+    }
+}
+
+fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
+    use windows::Win32::UI::Controls::Dialogs::*;
+
+    unsafe {
+        let mut custom: [COLORREF; 16] = [COLORREF(0); 16];
+        let mut cc = CHOOSECOLORW {
+            lStructSize: mem::size_of::<CHOOSECOLORW>() as u32,
+            hwndOwner: hwnd,
+            rgbResult: COLORREF(initial),
+            lpCustColors: custom.as_mut_ptr(),
+            Flags: CC_RGBINIT | CC_FULLOPEN,
+            ..Default::default()
+        };
+        if ChooseColorW(&mut cc).as_bool() {
+            Some(cc.rgbResult.0)
+        } else {
+            None
+        }
     }
 }
 

@@ -67,6 +67,8 @@ pub struct BubbleWindow {
     pub selected_index: i32,
     pub previous_selected_index: i32,
     dark_mode: bool,
+    theme_mode: ThemeMode,
+    custom_colors: CustomThemeColors,
     desired_phys_x: i32,
     desired_phys_y: i32,
 }
@@ -96,6 +98,8 @@ impl BubbleWindow {
             selected_index: -1,
             previous_selected_index: -1,
             dark_mode: is_dark_mode(),
+            theme_mode: ThemeMode::System,
+            custom_colors: CustomThemeColors::default(),
             desired_phys_x: 0,
             desired_phys_y: 0,
         };
@@ -106,11 +110,20 @@ impl BubbleWindow {
     pub fn set_size(&mut self, size: BubbleSize) {
         self.size = size;
         self.create_text_format();
-        self.render_target = None; // Force recreate on next render
+        self.render_target = None;
+    }
+
+    pub fn set_theme_mode(&mut self, mode: ThemeMode) {
+        self.theme_mode = mode;
+        self.dark_mode = resolve_dark_mode(mode);
+    }
+
+    pub fn set_custom_colors(&mut self, colors: CustomThemeColors) {
+        self.custom_colors = colors;
     }
 
     pub fn refresh_theme(&mut self) {
-        self.dark_mode = is_dark_mode();
+        self.dark_mode = resolve_dark_mode(self.theme_mode);
     }
 
     fn create_text_format(&mut self) {
@@ -380,10 +393,37 @@ impl BubbleWindow {
 
         let metrics = self.size.metrics();
         let opacity = self.anim.opacity();
-        let (bg_color, border_color, fg_base) = if self.dark_mode {
-            (DARK_BG, DARK_BORDER, D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
-        } else {
-            (LIGHT_BG, LIGHT_BORDER, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+        let (bg_color, border_color, fg_base) = match self.theme_mode {
+            ThemeMode::Custom => {
+                let bg_rgb = self.custom_colors.bg_color;
+                let bg_color = D2D1_COLOR_F {
+                    r: (bg_rgb & 0xFF) as f32 / 255.0,
+                    g: ((bg_rgb >> 8) & 0xFF) as f32 / 255.0,
+                    b: ((bg_rgb >> 16) & 0xFF) as f32 / 255.0,
+                    a: self.custom_colors.opacity as f32 / 255.0,
+                };
+                let fg_rgb = self.custom_colors.fg_color;
+                let fg_base = D2D1_COLOR_F {
+                    r: (fg_rgb & 0xFF) as f32 / 255.0,
+                    g: ((fg_rgb >> 8) & 0xFF) as f32 / 255.0,
+                    b: ((fg_rgb >> 16) & 0xFF) as f32 / 255.0,
+                    a: 1.0,
+                };
+                let border_color = D2D1_COLOR_F {
+                    r: fg_base.r,
+                    g: fg_base.g,
+                    b: fg_base.b,
+                    a: 0x44 as f32 / 255.0,
+                };
+                (bg_color, border_color, fg_base)
+            }
+            _ => {
+                if self.dark_mode {
+                    (DARK_BG, DARK_BORDER, D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+                } else {
+                    (LIGHT_BG, LIGHT_BORDER, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                }
+            }
         };
 
         unsafe {
@@ -772,6 +812,15 @@ unsafe extern "system" fn bubble_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) }
+}
+
+fn resolve_dark_mode(theme_mode: ThemeMode) -> bool {
+    match theme_mode {
+        ThemeMode::System => is_dark_mode(),
+        ThemeMode::Light => false,
+        ThemeMode::Dark => true,
+        ThemeMode::Custom => false,
+    }
 }
 
 fn is_dark_mode() -> bool {
