@@ -211,7 +211,7 @@ pub fn show_context_menu(
 
         let opacity_menu = CreatePopupMenu().ok()?;
         let opacity_labels = ["25%", "50%", "75%", "85%", "90%", "95%", "100%"];
-        let opacity_values: [u8; 7] = [64, 128, 191, 217, 230, 242, 255];
+        let opacity_values = crate::types::OPACITY_VALUES;
         for (i, label) in opacity_labels.iter().enumerate() {
             let flags = MF_STRING | if opacity_values[i] == custom_colors.opacity { MF_CHECKED } else { MF_UNCHECKED };
             let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();

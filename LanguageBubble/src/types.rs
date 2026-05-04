@@ -36,6 +36,8 @@ pub enum ThemeMode {
     Custom,
 }
 
+pub const OPACITY_VALUES: [u8; 7] = [64, 128, 191, 217, 230, 242, 255];
+
 #[derive(Debug, Clone, Copy)]
 pub struct CustomThemeColors {
     pub bg_color: u32,

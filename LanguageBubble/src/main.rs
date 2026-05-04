@@ -518,10 +518,9 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                 state.bubble.set_theme_mode(mode);
                 settings::save_theme_mode(mode);
             }
-            c if c >= tray::CMD_OPACITY_BASE && c < tray::CMD_OPACITY_BASE + 7 => {
-                let opacity_values: [u8; 7] = [64, 128, 191, 217, 230, 242, 255];
+            c if c >= tray::CMD_OPACITY_BASE && c < tray::CMD_OPACITY_BASE + OPACITY_VALUES.len() as u16 => {
                 let idx = (c - tray::CMD_OPACITY_BASE) as usize;
-                state.custom_colors.opacity = opacity_values[idx];
+                state.custom_colors.opacity = OPACITY_VALUES[idx];
                 state.bubble.set_custom_colors(state.custom_colors);
                 settings::save_custom_theme_colors(&state.custom_colors);
             }
