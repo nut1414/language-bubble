@@ -288,10 +288,12 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
             let _ = AppendMenuW(advanced_menu, check_flags, CMD_CHECK_UPDATES_TOGGLE as usize, PCWSTR(check_wide.as_ptr()));
         }
 
-        if pending_update.is_some() {
-            let dl_label = "Download update...";
-            let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(advanced_menu, MF_STRING, CMD_DOWNLOAD_UPDATE as usize, PCWSTR(dl_wide.as_ptr()));
+        if !is_msix {
+            if let Some(pending) = pending_update {
+                let dl_label = format!("Download update... ({})", pending);
+                let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
+                let _ = AppendMenuW(advanced_menu, MF_STRING, CMD_DOWNLOAD_UPDATE as usize, PCWSTR(dl_wide.as_ptr()));
+            }
         }
 
         let _ = AppendMenuW(menu, MF_POPUP, advanced_menu.0 as usize, w!("Advanced"));
