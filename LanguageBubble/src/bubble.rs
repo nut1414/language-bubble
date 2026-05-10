@@ -248,9 +248,11 @@ impl BubbleWindow {
         self.render_target = None;
 
         // Position and animate
-        if can_slide && self.display_mode == DisplayMode::Expanded && caret.is_some() {
+        if can_slide
+            && self.display_mode == DisplayMode::Expanded
+            && let Some(caret_pt) = caret
+        {
             // EXPANDED SLIDE: compute target without moving the window yet
-            let caret_pt = caret.unwrap();
             let target_x = self.compute_expanded_x(caret_pt, selected, win_w);
             let target_y = self.compute_caret_y(caret_pt, win_w, win_h);
 

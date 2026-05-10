@@ -425,27 +425,27 @@ fn on_tray_right_click(hwnd: HWND) {
     let is_msix = settings::is_msix_packaged();
     let app_version = env!("CARGO_PKG_VERSION");
 
-    let Some(cmd) = tray::show_context_menu(
+    let Some(cmd) = tray::show_context_menu(tray::ContextMenuParams {
         hwnd,
-        &layouts,
+        layouts: &layouts,
         current_hkl,
         start_with_windows,
         size,
-        caps,
-        winsp,
-        altsh,
-        caps_d,
-        winsp_d,
-        altsh_d,
-        hot,
-        emru,
-        theme,
-        &cc,
-        settings::get_check_for_updates(),
-        pending_update.as_deref(),
+        caps_lock_mode: caps,
+        win_space_mode: winsp,
+        alt_shift_mode: altsh,
+        caps_lock_display: caps_d,
+        win_space_display: winsp_d,
+        alt_shift_display: altsh_d,
+        hide_on_typing: hot,
+        expanded_mru_only: emru,
+        theme_mode: theme,
+        custom_colors: &cc,
+        check_for_updates: settings::get_check_for_updates(),
+        pending_update: pending_update.as_deref(),
         app_version,
         is_msix,
-    ) else {
+    }) else {
         return;
     };
 
@@ -524,7 +524,7 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                 state.expanded_mru_only = !state.expanded_mru_only;
                 settings::save_expanded_mru_only(state.expanded_mru_only);
             }
-            c if c >= tray::CMD_SIZE_BASE && c < tray::CMD_SIZE_BASE + 5 => {
+            c if (tray::CMD_SIZE_BASE..tray::CMD_SIZE_BASE + 5).contains(&c) => {
                 let sizes = [
                     BubbleSize::ExtraSmall,
                     BubbleSize::Small,
@@ -536,7 +536,7 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                 state.bubble.set_size(size);
                 settings::save_bubble_size(size);
             }
-            c if c >= tray::CMD_KEY_CAPSLOCK_BASE && c < tray::CMD_KEY_CAPSLOCK_BASE + 3 => {
+            c if (tray::CMD_KEY_CAPSLOCK_BASE..tray::CMD_KEY_CAPSLOCK_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_BASE) as usize);
                 state.caps_lock_mode = mode;
                 hook::set_caps_lock_mode(mode);
@@ -545,34 +545,40 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                     capslock::ensure_caps_lock_off();
                 }
             }
-            c if c >= tray::CMD_KEY_WINSPACE_BASE && c < tray::CMD_KEY_WINSPACE_BASE + 3 => {
+            c if (tray::CMD_KEY_WINSPACE_BASE..tray::CMD_KEY_WINSPACE_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_WINSPACE_BASE) as usize);
                 state.win_space_mode = mode;
                 hook::set_win_space_mode(mode);
                 settings::save_key_mode("WinSpaceMode", mode);
             }
-            c if c >= tray::CMD_KEY_ALTSHIFT_BASE && c < tray::CMD_KEY_ALTSHIFT_BASE + 3 => {
+            c if (tray::CMD_KEY_ALTSHIFT_BASE..tray::CMD_KEY_ALTSHIFT_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_BASE) as usize);
                 state.alt_shift_mode = mode;
                 hook::set_alt_shift_mode(mode);
                 settings::save_key_mode("AltShiftMode", mode);
             }
-            c if c >= tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE && c < tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE..tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE) as usize);
                 state.caps_lock_display = mode;
                 settings::save_key_display_mode("CapsLockDisplayMode", mode);
             }
-            c if c >= tray::CMD_KEY_WINSPACE_DISPLAY_BASE && c < tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_WINSPACE_DISPLAY_BASE..tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_WINSPACE_DISPLAY_BASE) as usize);
                 state.win_space_display = mode;
                 settings::save_key_display_mode("WinSpaceDisplayMode", mode);
             }
-            c if c >= tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE && c < tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE..tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE) as usize);
                 state.alt_shift_display = mode;
                 settings::save_key_display_mode("AltShiftDisplayMode", mode);
             }
-            c if c >= tray::CMD_THEME_BASE && c < tray::CMD_THEME_BASE + 4 => {
+            c if (tray::CMD_THEME_BASE..tray::CMD_THEME_BASE + 4).contains(&c) => {
                 let mode = theme_mode_from_index((c - tray::CMD_THEME_BASE) as usize);
                 state.theme_mode = mode;
                 state.bubble.set_theme_mode(mode);

@@ -39,17 +39,18 @@ pub fn check_in_background(hwnd: HWND) {
                 crate::settings::save_last_seen_version(&tag);
             }
 
-            if is_newer(&tag, current) && is_newer(&tag, &old_last_seen) {
-                if let Ok(mut guard) = PENDING_UPDATE.lock() {
-                    *guard = Some(tag);
-                    unsafe {
-                        let _ = PostMessageW(
-                            Some(hwnd),
-                            WM_UPDATE_AVAILABLE,
-                            windows::Win32::Foundation::WPARAM(0),
-                            windows::Win32::Foundation::LPARAM(0),
-                        );
-                    }
+            if is_newer(&tag, current)
+                && is_newer(&tag, &old_last_seen)
+                && let Ok(mut guard) = PENDING_UPDATE.lock()
+            {
+                *guard = Some(tag);
+                unsafe {
+                    let _ = PostMessageW(
+                        Some(hwnd),
+                        WM_UPDATE_AVAILABLE,
+                        windows::Win32::Foundation::WPARAM(0),
+                        windows::Win32::Foundation::LPARAM(0),
+                    );
                 }
             }
         }
@@ -155,7 +156,7 @@ fn extract_tag_name(json: &str) -> Option<String> {
     let mut chars = rest.chars();
     // skip whitespace and colon
     let mut found_colon = false;
-    while let Some(c) = chars.next() {
+    for c in chars.by_ref() {
         if c == ':' {
             found_colon = true;
             break;
@@ -169,7 +170,7 @@ fn extract_tag_name(json: &str) -> Option<String> {
     }
     // skip whitespace and opening quote
     let mut found_quote = false;
-    while let Some(c) = chars.next() {
+    for c in chars.by_ref() {
         if c == '"' {
             found_quote = true;
             break;

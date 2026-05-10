@@ -148,7 +148,7 @@ fn try_msaa_caret() -> Option<ScreenPoint> {
 
 fn try_uia_caret() -> Option<ScreenPoint> {
     // Wrap in catch_unwind because COM UIA calls can sometimes fail unexpectedly
-    std::panic::catch_unwind(|| try_uia_caret_inner()).ok().flatten()
+    std::panic::catch_unwind(try_uia_caret_inner).ok().flatten()
 }
 
 fn try_uia_caret_inner() -> Option<ScreenPoint> {
@@ -195,26 +195,24 @@ fn try_uia_element_caret(element: &IUIAutomationElement) -> Option<ScreenPoint> 
             element.GetCurrentPatternAs::<IUIAutomationTextPattern2>(UIA_TextPattern2Id)
         {
             let mut is_active = BOOL(0);
-            if let Ok(range) = pat2.GetCaretRange(&mut is_active) {
-                if let Some(pt) = point_from_range(&range) {
-                    return Some(pt);
-                }
+            if let Ok(range) = pat2.GetCaretRange(&mut is_active)
+                && let Some(pt) = point_from_range(&range)
+            {
+                return Some(pt);
             }
         }
 
         // Fallback: TextPattern.GetSelection (Office, Edge)
         if let Ok(pat) =
             element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+            && let Ok(ranges) = pat.GetSelection()
         {
-            if let Ok(ranges) = pat.GetSelection() {
-                let len = ranges.Length().unwrap_or(0);
-                if len > 0 {
-                    if let Ok(range) = ranges.GetElement(0) {
-                        if let Some(pt) = point_from_range(&range) {
-                            return Some(pt);
-                        }
-                    }
-                }
+            let len = ranges.Length().unwrap_or(0);
+            if len > 0
+                && let Ok(range) = ranges.GetElement(0)
+                && let Some(pt) = point_from_range(&range)
+            {
+                return Some(pt);
             }
         }
 

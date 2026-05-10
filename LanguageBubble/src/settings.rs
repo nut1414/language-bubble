@@ -132,20 +132,20 @@ pub fn save_theme_mode(mode: ThemeMode) {
 
 pub fn get_custom_theme_colors() -> CustomThemeColors {
     let mut colors = CustomThemeColors::default();
-    if let Some(s) = read_string(w!("CustomBG")) {
-        if let Ok(v) = u32::from_str_radix(&s, 16) {
-            colors.bg_color = v;
-        }
+    if let Some(s) = read_string(w!("CustomBG"))
+        && let Ok(v) = u32::from_str_radix(&s, 16)
+    {
+        colors.bg_color = v;
     }
-    if let Some(s) = read_string(w!("CustomFG")) {
-        if let Ok(v) = u32::from_str_radix(&s, 16) {
-            colors.fg_color = v;
-        }
+    if let Some(s) = read_string(w!("CustomFG"))
+        && let Ok(v) = u32::from_str_radix(&s, 16)
+    {
+        colors.fg_color = v;
     }
-    if let Some(s) = read_string(w!("CustomOpacity")) {
-        if let Ok(v) = s.parse::<u8>() {
-            colors.opacity = v;
-        }
+    if let Some(s) = read_string(w!("CustomOpacity"))
+        && let Ok(v) = s.parse::<u8>()
+    {
+        colors.opacity = v;
     }
     colors
 }
