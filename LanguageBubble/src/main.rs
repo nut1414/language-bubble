@@ -107,6 +107,9 @@ fn main() {
     let theme_mode = settings::get_theme_mode();
     let custom_colors = settings::get_custom_theme_colors();
 
+    // Restore pending update from registry (if any)
+    let pending_update = update::pending_from_registry();
+
     // Create message-only window
     let msg_hwnd = create_msg_window();
 
