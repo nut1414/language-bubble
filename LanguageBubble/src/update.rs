@@ -5,6 +5,8 @@ use windows::Win32::Foundation::HWND;
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
 
+const USER_AGENT: &str = concat!("language-bubble/", env!("CARGO_PKG_VERSION"));
+
 pub const WM_UPDATE_AVAILABLE: u32 = WM_USER + 2;
 pub static PENDING_UPDATE: Mutex<Option<String>> = Mutex::new(None);
 

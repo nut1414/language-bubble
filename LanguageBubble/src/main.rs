@@ -173,7 +173,7 @@ fn main() {
             custom_colors,
             is_switching: false,
             pending_combo: None,
-            pending_update: update::pending_from_registry(),
+            pending_update,
         });
     });
 
