@@ -50,7 +50,7 @@ impl Default for CustomThemeColors {
         Self {
             bg_color: 0x002D2D2D,
             fg_color: 0x00FFFFFF,
-            opacity: 0xDD,
+            opacity: 217,
         }
     }
 }
