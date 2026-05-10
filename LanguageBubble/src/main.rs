@@ -9,6 +9,7 @@ mod language;
 mod settings;
 mod tray;
 mod types;
+mod update;
 
 use std::cell::RefCell;
 use std::mem;
@@ -44,6 +45,7 @@ struct AppState {
     custom_colors: CustomThemeColors,
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
+    pending_update: Option<String>,
 }
 
 // Everything runs on the main (message pump) thread, so thread_local RefCell is safe.
@@ -128,6 +130,20 @@ fn main() {
         "Running in the system tray. Right-click the tray icon to configure.",
     );
 
+    // Check for updates (non-MSIX only)
+    if !settings::is_msix_packaged()
+        && settings::get_check_for_updates()
+    {
+        let last_check = settings::get_last_update_check();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(last_check) > 24 * 3600 {
+            update::check_in_background(msg_hwnd);
+        }
+    }
+
     // Install keyboard hook
     hook::install(msg_hwnd, caps_lock_mode, win_space_mode, alt_shift_mode);
 
@@ -154,6 +170,7 @@ fn main() {
             custom_colors,
             is_switching: false,
             pending_combo: None,
+            pending_update: update::pending_from_registry(),
         });
     });
 
@@ -235,6 +252,22 @@ unsafe extern "system" fn msg_wnd_proc(
             let mouse_msg = (lparam.0 & 0xFFFF) as u32;
             if mouse_msg == WM_RBUTTONUP {
                 on_tray_right_click(hwnd);
+            }
+            LRESULT(0)
+        }
+        m if m == update::WM_UPDATE_AVAILABLE => {
+            let new_version = {
+                if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(version) = new_version {
+                with_app(|state| {
+                    state.pending_update = Some(version.clone());
+                    state._tray.show_balloon("Language Bubble", &format!("Update available: {}", version));
+                });
             }
             LRESULT(0)
         }
@@ -378,12 +411,16 @@ fn on_tray_right_click(hwnd: HWND) {
             state.expanded_mru_only,
             state.theme_mode,
             state.custom_colors,
+            state.pending_update.clone(),
         )
     });
 
-    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc)) = data else {
+    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc, pending_update)) = data else {
         return;
     };
+
+    let is_msix = settings::is_msix_packaged();
+    let app_version = env!("CARGO_PKG_VERSION");
 
     let Some(cmd) = tray::show_context_menu(
         hwnd,
@@ -401,6 +438,10 @@ fn on_tray_right_click(hwnd: HWND) {
         emru,
         theme,
         &cc,
+        settings::get_check_for_updates(),
+        pending_update.as_deref(),
+        app_version,
+        is_msix,
     ) else {
         return;
     };
@@ -446,6 +487,22 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                         None,
                         w!("open"),
                         w!("https://github.com/nut1414/language-bubble/issues"),
+                        None,
+                        None,
+                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    );
+                }
+            }
+            tray::CMD_CHECK_UPDATES_TOGGLE => {
+                let current = settings::get_check_for_updates();
+                settings::save_check_for_updates(!current);
+            }
+            tray::CMD_DOWNLOAD_UPDATE => {
+                unsafe {
+                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                        None,
+                        w!("open"),
+                        w!("https://github.com/nut1414/language-bubble/releases/latest"),
                         None,
                         None,
                         windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,

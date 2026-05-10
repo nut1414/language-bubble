@@ -9,7 +9,7 @@ const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run
 const APP_NAME: PCWSTR = w!("LanguageBubble");
 const STARTUP_TASK_ID: &str = "LanguageBubbleStartup";
 
-fn is_msix_packaged() -> bool {
+pub fn is_msix_packaged() -> bool {
     Package::Current().is_ok()
 }
 
@@ -243,6 +243,32 @@ fn set_start_with_windows_registry(enable: bool) {
         }
         let _ = RegCloseKey(hkey);
     }
+}
+
+pub fn get_check_for_updates() -> bool {
+    read_string(w!("CheckForUpdates")).as_deref() != Some("False")
+}
+
+pub fn save_check_for_updates(enabled: bool) {
+    write_string(w!("CheckForUpdates"), if enabled { "True" } else { "False" });
+}
+
+pub fn get_last_update_check() -> u64 {
+    read_string(w!("LastUpdateCheck"))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn save_last_update_check(timestamp: u64) {
+    write_string(w!("LastUpdateCheck"), &timestamp.to_string());
+}
+
+pub fn get_last_seen_version() -> String {
+    read_string(w!("LastSeenVersion")).unwrap_or_default()
+}
+
+pub fn save_last_seen_version(version: &str) {
+    write_string(w!("LastSeenVersion"), version);
 }
 
 pub fn migrate_old_settings() {

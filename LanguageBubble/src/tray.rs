@@ -31,6 +31,8 @@ pub const CMD_THEME_BASE: u16 = 1400;
 pub const CMD_CUSTOM_BG_COLOR: u16 = 1410;
 pub const CMD_CUSTOM_FG_COLOR: u16 = 1411;
 pub const CMD_OPACITY_BASE: u16 = 1420;
+pub const CMD_CHECK_UPDATES_TOGGLE: u16 = 1503;
+pub const CMD_DOWNLOAD_UPDATE: u16 = 1504;
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -140,6 +142,10 @@ pub fn show_context_menu(
     expanded_mru_only: bool,
     theme_mode: crate::types::ThemeMode,
     custom_colors: &crate::types::CustomThemeColors,
+    check_for_updates: bool,
+    pending_update: Option<&str>,
+    app_version: &str,
+    is_msix: bool,
 ) -> Option<u16> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
@@ -244,6 +250,28 @@ pub fn show_context_menu(
         // Show Only Recent Languages (for Expanded mode)
         let mru_flags = MF_STRING | if expanded_mru_only { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
+
+        // Advanced submenu
+        let advanced_menu = CreatePopupMenu().ok()?;
+        let version_label = format!("Version {}", app_version);
+        let version_wide: Vec<u16> = version_label.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(advanced_menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, PCWSTR(version_wide.as_ptr()));
+
+        if !is_msix {
+            let _ = AppendMenuW(advanced_menu, MF_SEPARATOR, 0, None);
+            let check_label = "Check for updates";
+            let check_wide: Vec<u16> = check_label.encode_utf16().chain(std::iter::once(0)).collect();
+            let check_flags = MF_STRING | if check_for_updates { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(advanced_menu, check_flags, CMD_CHECK_UPDATES_TOGGLE as usize, PCWSTR(check_wide.as_ptr()));
+        }
+
+        if pending_update.is_some() {
+            let dl_label = "Download update...";
+            let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(advanced_menu, MF_STRING, CMD_DOWNLOAD_UPDATE as usize, PCWSTR(dl_wide.as_ptr()));
+        }
+
+        let _ = AppendMenuW(menu, MF_POPUP, advanced_menu.0 as usize, w!("Advanced"));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
