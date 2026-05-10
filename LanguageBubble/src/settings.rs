@@ -120,6 +120,42 @@ pub fn save_expanded_mru_only(enabled: bool) {
     );
 }
 
+pub fn get_theme_mode() -> ThemeMode {
+    read_string(w!("ThemeMode"))
+        .map(|s| ThemeMode::from_str(&s))
+        .unwrap_or(ThemeMode::System)
+}
+
+pub fn save_theme_mode(mode: ThemeMode) {
+    write_string(w!("ThemeMode"), mode.as_str());
+}
+
+pub fn get_custom_theme_colors() -> CustomThemeColors {
+    let mut colors = CustomThemeColors::default();
+    if let Some(s) = read_string(w!("CustomBG")) {
+        if let Ok(v) = u32::from_str_radix(&s, 16) {
+            colors.bg_color = v;
+        }
+    }
+    if let Some(s) = read_string(w!("CustomFG")) {
+        if let Ok(v) = u32::from_str_radix(&s, 16) {
+            colors.fg_color = v;
+        }
+    }
+    if let Some(s) = read_string(w!("CustomOpacity")) {
+        if let Ok(v) = s.parse::<u8>() {
+            colors.opacity = v;
+        }
+    }
+    colors
+}
+
+pub fn save_custom_theme_colors(colors: &CustomThemeColors) {
+    write_string(w!("CustomBG"), &format!("{:06X}", colors.bg_color & 0x00FFFFFF));
+    write_string(w!("CustomFG"), &format!("{:06X}", colors.fg_color & 0x00FFFFFF));
+    write_string(w!("CustomOpacity"), &colors.opacity.to_string());
+}
+
 pub fn is_start_with_windows() -> bool {
     if is_msix_packaged() {
         is_start_with_windows_msix()

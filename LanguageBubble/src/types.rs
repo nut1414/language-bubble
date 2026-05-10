@@ -28,6 +28,33 @@ pub enum DisplayMode {
     Expanded,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ThemeMode {
+    System,
+    Light,
+    Dark,
+    Custom,
+}
+
+pub const OPACITY_VALUES: [u8; 7] = [64, 128, 191, 217, 230, 242, 255];
+
+#[derive(Debug, Clone, Copy)]
+pub struct CustomThemeColors {
+    pub bg_color: u32,
+    pub fg_color: u32,
+    pub opacity: u8,
+}
+
+impl Default for CustomThemeColors {
+    fn default() -> Self {
+        Self {
+            bg_color: 0x002D2D2D,
+            fg_color: 0x00FFFFFF,
+            opacity: 217,
+        }
+    }
+}
+
 impl BubbleSize {
     pub fn metrics(self) -> SizeMetrics {
         match self {
@@ -133,6 +160,26 @@ impl DisplayMode {
             DisplayMode::Carousel => "Carousel",
             DisplayMode::Simple => "Simple",
             DisplayMode::Expanded => "Expanded",
+        }
+    }
+}
+
+impl ThemeMode {
+    pub fn from_str(s: &str) -> Self {
+        match s {
+            "Light" => ThemeMode::Light,
+            "Dark" => ThemeMode::Dark,
+            "Custom" => ThemeMode::Custom,
+            _ => ThemeMode::System,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ThemeMode::System => "System",
+            ThemeMode::Light => "Light",
+            ThemeMode::Dark => "Dark",
+            ThemeMode::Custom => "Custom",
         }
     }
 }

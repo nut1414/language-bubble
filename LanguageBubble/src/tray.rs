@@ -26,6 +26,11 @@ pub const CMD_KEY_ALTSHIFT_BASE: u16 = 1320;
 pub const CMD_KEY_CAPSLOCK_DISPLAY_BASE: u16 = 1330;
 pub const CMD_KEY_WINSPACE_DISPLAY_BASE: u16 = 1340;
 pub const CMD_KEY_ALTSHIFT_DISPLAY_BASE: u16 = 1350;
+// Theme: 1400=System, 1401=Light, 1402=Dark, 1403=Custom
+pub const CMD_THEME_BASE: u16 = 1400;
+pub const CMD_CUSTOM_BG_COLOR: u16 = 1410;
+pub const CMD_CUSTOM_FG_COLOR: u16 = 1411;
+pub const CMD_OPACITY_BASE: u16 = 1420;
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -133,6 +138,8 @@ pub fn show_context_menu(
     alt_shift_display: crate::types::DisplayMode,
     hide_on_typing: bool,
     expanded_mru_only: bool,
+    theme_mode: crate::types::ThemeMode,
+    custom_colors: &crate::types::CustomThemeColors,
 ) -> Option<u16> {
     unsafe {
         let menu = CreatePopupMenu().ok()?;
@@ -174,6 +181,54 @@ pub fn show_context_menu(
             let _ = AppendMenuW(size_menu, flags, (CMD_SIZE_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
         }
         let _ = AppendMenuW(menu, MF_POPUP, size_menu.0 as usize, w!("Size"));
+
+        let theme_menu = CreatePopupMenu().ok()?;
+        let themes = [
+            ("System (Auto)", crate::types::ThemeMode::System),
+            ("Light", crate::types::ThemeMode::Light),
+            ("Dark", crate::types::ThemeMode::Dark),
+            ("Custom", crate::types::ThemeMode::Custom),
+        ];
+        for (i, (label, t)) in themes.iter().enumerate() {
+            let flags = MF_STRING | if *t == theme_mode { MF_CHECKED } else { MF_UNCHECKED };
+            let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(theme_menu, flags, (CMD_THEME_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
+        }
+
+        let _ = AppendMenuW(theme_menu, MF_SEPARATOR, 0, None);
+
+        let customize_menu = CreatePopupMenu().ok()?;
+
+        let bg_label = "Background Color...";
+        let bg_wide: Vec<u16> = bg_label.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(customize_menu, MF_STRING, CMD_CUSTOM_BG_COLOR as usize, PCWSTR(bg_wide.as_ptr()));
+
+        let fg_label = "Text Color...";
+        let fg_wide: Vec<u16> = fg_label.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(customize_menu, MF_STRING, CMD_CUSTOM_FG_COLOR as usize, PCWSTR(fg_wide.as_ptr()));
+
+        let _ = AppendMenuW(customize_menu, MF_SEPARATOR, 0, None);
+
+        let opacity_menu = CreatePopupMenu().ok()?;
+        let opacity_labels = ["25%", "50%", "75%", "85%", "90%", "95%", "100%"];
+        let opacity_values = crate::types::OPACITY_VALUES;
+        for (i, label) in opacity_labels.iter().enumerate() {
+            let flags = MF_STRING | if opacity_values[i] == custom_colors.opacity { MF_CHECKED } else { MF_UNCHECKED };
+            let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(opacity_menu, flags, (CMD_OPACITY_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
+        }
+        let opacity_wide: Vec<u16> = "Opacity".encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(customize_menu, MF_POPUP, opacity_menu.0 as usize, PCWSTR(opacity_wide.as_ptr()));
+
+        let customize_flags = if theme_mode == crate::types::ThemeMode::Custom {
+            MF_POPUP
+        } else {
+            MF_POPUP | MF_GRAYED
+        };
+        let customize_label: Vec<u16> = "Customize...".encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(theme_menu, customize_flags, customize_menu.0 as usize, PCWSTR(customize_label.as_ptr()));
+
+        let _ = AppendMenuW(menu, MF_POPUP, theme_menu.0 as usize, w!("Theme"));
 
         // Key Bindings submenu (now includes display mode per key)
         let key_menu = CreatePopupMenu().ok()?;
