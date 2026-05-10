@@ -42,7 +42,7 @@ impl LanguageService {
             }
             let mut hkls = vec![HKL::default(); count];
             GetKeyboardLayoutList(Some(&mut hkls));
-            self.layouts = hkls.into_iter().map(|hkl| make_layout_info(hkl)).collect();
+            self.layouts = hkls.into_iter().map(make_layout_info).collect();
         }
     }
 
@@ -63,10 +63,10 @@ impl LanguageService {
     }
 
     pub fn record_layout_usage(&mut self, hkl: HKL) {
-        if let Some(layout) = self.layouts.iter().find(|l| l.hkl == hkl) {
-            if layout.two_letter != "en" {
-                self.last_non_english_hkl = Some(hkl);
-            }
+        if let Some(layout) = self.layouts.iter().find(|l| l.hkl == hkl)
+            && layout.two_letter != "en"
+        {
+            self.last_non_english_hkl = Some(hkl);
         }
     }
 
@@ -93,11 +93,11 @@ impl LanguageService {
 
         if current_is_english {
             // Switch to last non-English
-            if let Some(last_hkl) = self.last_non_english_hkl {
-                if let Some(target) = self.layouts.iter().find(|l| l.hkl == last_hkl) {
-                    activate_layout(target);
-                    return Some(target);
-                }
+            if let Some(last_hkl) = self.last_non_english_hkl
+                && let Some(target) = self.layouts.iter().find(|l| l.hkl == last_hkl)
+            {
+                activate_layout(target);
+                return Some(target);
             }
             // Fallback: first non-English
             if let Some(target) = self.layouts.iter().find(|l| l.two_letter != "en") {

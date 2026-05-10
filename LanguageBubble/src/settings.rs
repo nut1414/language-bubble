@@ -9,7 +9,7 @@ const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run
 const APP_NAME: PCWSTR = w!("LanguageBubble");
 const STARTUP_TASK_ID: &str = "LanguageBubbleStartup";
 
-fn is_msix_packaged() -> bool {
+pub fn is_msix_packaged() -> bool {
     Package::Current().is_ok()
 }
 
@@ -132,20 +132,20 @@ pub fn save_theme_mode(mode: ThemeMode) {
 
 pub fn get_custom_theme_colors() -> CustomThemeColors {
     let mut colors = CustomThemeColors::default();
-    if let Some(s) = read_string(w!("CustomBG")) {
-        if let Ok(v) = u32::from_str_radix(&s, 16) {
-            colors.bg_color = v;
-        }
+    if let Some(s) = read_string(w!("CustomBG"))
+        && let Ok(v) = u32::from_str_radix(&s, 16)
+    {
+        colors.bg_color = v;
     }
-    if let Some(s) = read_string(w!("CustomFG")) {
-        if let Ok(v) = u32::from_str_radix(&s, 16) {
-            colors.fg_color = v;
-        }
+    if let Some(s) = read_string(w!("CustomFG"))
+        && let Ok(v) = u32::from_str_radix(&s, 16)
+    {
+        colors.fg_color = v;
     }
-    if let Some(s) = read_string(w!("CustomOpacity")) {
-        if let Ok(v) = s.parse::<u8>() {
-            colors.opacity = v;
-        }
+    if let Some(s) = read_string(w!("CustomOpacity"))
+        && let Ok(v) = s.parse::<u8>()
+    {
+        colors.opacity = v;
     }
     colors
 }
@@ -243,6 +243,32 @@ fn set_start_with_windows_registry(enable: bool) {
         }
         let _ = RegCloseKey(hkey);
     }
+}
+
+pub fn get_check_for_updates() -> bool {
+    read_string(w!("CheckForUpdates")).as_deref() != Some("False")
+}
+
+pub fn save_check_for_updates(enabled: bool) {
+    write_string(w!("CheckForUpdates"), if enabled { "True" } else { "False" });
+}
+
+pub fn get_last_update_check() -> u64 {
+    read_string(w!("LastUpdateCheck"))
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(0)
+}
+
+pub fn save_last_update_check(timestamp: u64) {
+    write_string(w!("LastUpdateCheck"), &timestamp.to_string());
+}
+
+pub fn get_last_seen_version() -> String {
+    read_string(w!("LastSeenVersion")).unwrap_or_default()
+}
+
+pub fn save_last_seen_version(version: &str) {
+    write_string(w!("LastSeenVersion"), version);
 }
 
 pub fn migrate_old_settings() {

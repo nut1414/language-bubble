@@ -9,6 +9,7 @@ mod language;
 mod settings;
 mod tray;
 mod types;
+mod update;
 
 use std::cell::RefCell;
 use std::mem;
@@ -44,6 +45,7 @@ struct AppState {
     custom_colors: CustomThemeColors,
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
+    pending_update: Option<String>,
 }
 
 // Everything runs on the main (message pump) thread, so thread_local RefCell is safe.
@@ -105,6 +107,9 @@ fn main() {
     let theme_mode = settings::get_theme_mode();
     let custom_colors = settings::get_custom_theme_colors();
 
+    // Restore pending update from registry (if any)
+    let pending_update = update::pending_from_registry();
+
     // Create message-only window
     let msg_hwnd = create_msg_window();
 
@@ -127,6 +132,20 @@ fn main() {
         "Language Bubble",
         "Running in the system tray. Right-click the tray icon to configure.",
     );
+
+    // Check for updates (non-MSIX only)
+    if !settings::is_msix_packaged()
+        && settings::get_check_for_updates()
+    {
+        let last_check = settings::get_last_update_check();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        if now.saturating_sub(last_check) > 24 * 3600 {
+            update::check_in_background(msg_hwnd);
+        }
+    }
 
     // Install keyboard hook
     hook::install(msg_hwnd, caps_lock_mode, win_space_mode, alt_shift_mode);
@@ -154,6 +173,7 @@ fn main() {
             custom_colors,
             is_switching: false,
             pending_combo: None,
+            pending_update,
         });
     });
 
@@ -235,6 +255,22 @@ unsafe extern "system" fn msg_wnd_proc(
             let mouse_msg = (lparam.0 & 0xFFFF) as u32;
             if mouse_msg == WM_RBUTTONUP {
                 on_tray_right_click(hwnd);
+            }
+            LRESULT(0)
+        }
+        m if m == update::WM_UPDATE_AVAILABLE => {
+            let new_version = {
+                if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
+                    guard.take()
+                } else {
+                    None
+                }
+            };
+            if let Some(version) = new_version {
+                with_app(|state| {
+                    state.pending_update = Some(version.clone());
+                    state._tray.show_balloon("Language Bubble", &format!("Update available: {}", version));
+                });
             }
             LRESULT(0)
         }
@@ -378,30 +414,38 @@ fn on_tray_right_click(hwnd: HWND) {
             state.expanded_mru_only,
             state.theme_mode,
             state.custom_colors,
+            state.pending_update.clone(),
         )
     });
 
-    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc)) = data else {
+    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc, pending_update)) = data else {
         return;
     };
 
-    let Some(cmd) = tray::show_context_menu(
+    let is_msix = settings::is_msix_packaged();
+    let app_version = env!("CARGO_PKG_VERSION");
+
+    let Some(cmd) = tray::show_context_menu(tray::ContextMenuParams {
         hwnd,
-        &layouts,
+        layouts: &layouts,
         current_hkl,
         start_with_windows,
         size,
-        caps,
-        winsp,
-        altsh,
-        caps_d,
-        winsp_d,
-        altsh_d,
-        hot,
-        emru,
-        theme,
-        &cc,
-    ) else {
+        caps_lock_mode: caps,
+        win_space_mode: winsp,
+        alt_shift_mode: altsh,
+        caps_lock_display: caps_d,
+        win_space_display: winsp_d,
+        alt_shift_display: altsh_d,
+        hide_on_typing: hot,
+        expanded_mru_only: emru,
+        theme_mode: theme,
+        custom_colors: &cc,
+        check_for_updates: settings::get_check_for_updates(),
+        pending_update: pending_update.as_deref(),
+        app_version,
+        is_msix,
+    }) else {
         return;
     };
 
@@ -452,6 +496,22 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                     );
                 }
             }
+            tray::CMD_CHECK_UPDATES_TOGGLE => {
+                let current = settings::get_check_for_updates();
+                settings::save_check_for_updates(!current);
+            }
+            tray::CMD_DOWNLOAD_UPDATE => {
+                unsafe {
+                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                        None,
+                        w!("open"),
+                        w!("https://github.com/nut1414/language-bubble/releases/latest"),
+                        None,
+                        None,
+                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+                    );
+                }
+            }
             tray::CMD_START_WITH_WINDOWS => {
                 let current = settings::is_start_with_windows();
                 settings::set_start_with_windows(!current);
@@ -464,7 +524,7 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                 state.expanded_mru_only = !state.expanded_mru_only;
                 settings::save_expanded_mru_only(state.expanded_mru_only);
             }
-            c if c >= tray::CMD_SIZE_BASE && c < tray::CMD_SIZE_BASE + 5 => {
+            c if (tray::CMD_SIZE_BASE..tray::CMD_SIZE_BASE + 5).contains(&c) => {
                 let sizes = [
                     BubbleSize::ExtraSmall,
                     BubbleSize::Small,
@@ -476,7 +536,7 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                 state.bubble.set_size(size);
                 settings::save_bubble_size(size);
             }
-            c if c >= tray::CMD_KEY_CAPSLOCK_BASE && c < tray::CMD_KEY_CAPSLOCK_BASE + 3 => {
+            c if (tray::CMD_KEY_CAPSLOCK_BASE..tray::CMD_KEY_CAPSLOCK_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_BASE) as usize);
                 state.caps_lock_mode = mode;
                 hook::set_caps_lock_mode(mode);
@@ -485,34 +545,40 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
                     capslock::ensure_caps_lock_off();
                 }
             }
-            c if c >= tray::CMD_KEY_WINSPACE_BASE && c < tray::CMD_KEY_WINSPACE_BASE + 3 => {
+            c if (tray::CMD_KEY_WINSPACE_BASE..tray::CMD_KEY_WINSPACE_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_WINSPACE_BASE) as usize);
                 state.win_space_mode = mode;
                 hook::set_win_space_mode(mode);
                 settings::save_key_mode("WinSpaceMode", mode);
             }
-            c if c >= tray::CMD_KEY_ALTSHIFT_BASE && c < tray::CMD_KEY_ALTSHIFT_BASE + 3 => {
+            c if (tray::CMD_KEY_ALTSHIFT_BASE..tray::CMD_KEY_ALTSHIFT_BASE + 3).contains(&c) => {
                 let mode = key_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_BASE) as usize);
                 state.alt_shift_mode = mode;
                 hook::set_alt_shift_mode(mode);
                 settings::save_key_mode("AltShiftMode", mode);
             }
-            c if c >= tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE && c < tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE..tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE) as usize);
                 state.caps_lock_display = mode;
                 settings::save_key_display_mode("CapsLockDisplayMode", mode);
             }
-            c if c >= tray::CMD_KEY_WINSPACE_DISPLAY_BASE && c < tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_WINSPACE_DISPLAY_BASE..tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_WINSPACE_DISPLAY_BASE) as usize);
                 state.win_space_display = mode;
                 settings::save_key_display_mode("WinSpaceDisplayMode", mode);
             }
-            c if c >= tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE && c < tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3 => {
+            c if (tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE..tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3)
+                .contains(&c) =>
+            {
                 let mode = display_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE) as usize);
                 state.alt_shift_display = mode;
                 settings::save_key_display_mode("AltShiftDisplayMode", mode);
             }
-            c if c >= tray::CMD_THEME_BASE && c < tray::CMD_THEME_BASE + 4 => {
+            c if (tray::CMD_THEME_BASE..tray::CMD_THEME_BASE + 4).contains(&c) => {
                 let mode = theme_mode_from_index((c - tray::CMD_THEME_BASE) as usize);
                 state.theme_mode = mode;
                 state.bubble.set_theme_mode(mode);

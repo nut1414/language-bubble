@@ -31,6 +31,8 @@ pub const CMD_THEME_BASE: u16 = 1400;
 pub const CMD_CUSTOM_BG_COLOR: u16 = 1410;
 pub const CMD_CUSTOM_FG_COLOR: u16 = 1411;
 pub const CMD_OPACITY_BASE: u16 = 1420;
+pub const CMD_CHECK_UPDATES_TOGGLE: u16 = 1503;
+pub const CMD_DOWNLOAD_UPDATE: u16 = 1504;
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -39,7 +41,7 @@ pub struct TrayIcon {
 
 impl TrayIcon {
     pub fn create(hwnd: HWND) -> Self {
-        let h_icon = load_embedded_icon().unwrap_or(HICON::default());
+        let h_icon = load_embedded_icon().unwrap_or_default();
 
         let mut nid = NOTIFYICONDATAW {
             cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
@@ -113,7 +115,7 @@ fn load_embedded_icon() -> Option<HICON> {
         let hinstance = GetModuleHandleW(None).ok()?;
         let h = LoadImageW(
             Some(hinstance.into()),
-            PCWSTR(1 as *const u16), // resource ID 1 (winres default)
+            PCWSTR(std::ptr::without_provenance::<u16>(1)), // resource ID 1 (winres default)
             IMAGE_ICON,
             0,
             0,
@@ -124,23 +126,50 @@ fn load_embedded_icon() -> Option<HICON> {
     }
 }
 
-pub fn show_context_menu(
-    hwnd: HWND,
-    layouts: &[crate::language::LayoutInfo],
-    current_hkl: Option<windows::Win32::UI::Input::KeyboardAndMouse::HKL>,
-    start_with_windows: bool,
-    size: crate::types::BubbleSize,
-    caps_lock_mode: crate::types::SwitchMode,
-    win_space_mode: crate::types::SwitchMode,
-    alt_shift_mode: crate::types::SwitchMode,
-    caps_lock_display: crate::types::DisplayMode,
-    win_space_display: crate::types::DisplayMode,
-    alt_shift_display: crate::types::DisplayMode,
-    hide_on_typing: bool,
-    expanded_mru_only: bool,
-    theme_mode: crate::types::ThemeMode,
-    custom_colors: &crate::types::CustomThemeColors,
-) -> Option<u16> {
+pub struct ContextMenuParams<'a> {
+    pub hwnd: HWND,
+    pub layouts: &'a [crate::language::LayoutInfo],
+    pub current_hkl: Option<windows::Win32::UI::Input::KeyboardAndMouse::HKL>,
+    pub start_with_windows: bool,
+    pub size: crate::types::BubbleSize,
+    pub caps_lock_mode: crate::types::SwitchMode,
+    pub win_space_mode: crate::types::SwitchMode,
+    pub alt_shift_mode: crate::types::SwitchMode,
+    pub caps_lock_display: crate::types::DisplayMode,
+    pub win_space_display: crate::types::DisplayMode,
+    pub alt_shift_display: crate::types::DisplayMode,
+    pub hide_on_typing: bool,
+    pub expanded_mru_only: bool,
+    pub theme_mode: crate::types::ThemeMode,
+    pub custom_colors: &'a crate::types::CustomThemeColors,
+    pub check_for_updates: bool,
+    pub pending_update: Option<&'a str>,
+    pub app_version: &'a str,
+    pub is_msix: bool,
+}
+
+pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
+    let ContextMenuParams {
+        hwnd,
+        layouts,
+        current_hkl,
+        start_with_windows,
+        size,
+        caps_lock_mode,
+        win_space_mode,
+        alt_shift_mode,
+        caps_lock_display,
+        win_space_display,
+        alt_shift_display,
+        hide_on_typing,
+        expanded_mru_only,
+        theme_mode,
+        custom_colors,
+        check_for_updates,
+        pending_update,
+        app_version,
+        is_msix,
+    } = p;
     unsafe {
         let menu = CreatePopupMenu().ok()?;
 
@@ -244,6 +273,30 @@ pub fn show_context_menu(
         // Show Only Recent Languages (for Expanded mode)
         let mru_flags = MF_STRING | if expanded_mru_only { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
+
+        // Advanced submenu
+        let advanced_menu = CreatePopupMenu().ok()?;
+        let version_label = format!("Version {}", app_version);
+        let version_wide: Vec<u16> = version_label.encode_utf16().chain(std::iter::once(0)).collect();
+        let _ = AppendMenuW(advanced_menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, PCWSTR(version_wide.as_ptr()));
+
+        if !is_msix {
+            let _ = AppendMenuW(advanced_menu, MF_SEPARATOR, 0, None);
+            let check_label = "Check for updates";
+            let check_wide: Vec<u16> = check_label.encode_utf16().chain(std::iter::once(0)).collect();
+            let check_flags = MF_STRING | if check_for_updates { MF_CHECKED } else { MF_UNCHECKED };
+            let _ = AppendMenuW(advanced_menu, check_flags, CMD_CHECK_UPDATES_TOGGLE as usize, PCWSTR(check_wide.as_ptr()));
+        }
+
+        if !is_msix {
+            if let Some(pending) = pending_update {
+                let dl_label = format!("Download update... ({})", pending);
+                let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
+                let _ = AppendMenuW(advanced_menu, MF_STRING, CMD_DOWNLOAD_UPDATE as usize, PCWSTR(dl_wide.as_ptr()));
+            }
+        }
+
+        let _ = AppendMenuW(menu, MF_POPUP, advanced_menu.0 as usize, w!("Advanced"));
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
