@@ -32,6 +32,7 @@ const WM_SETTINGCHANGE: u32 = 0x001A;
 const DPI_AWARENESS_CONTEXT_PMV2: isize = -4;
 
 struct AppState {
+    hook: hook::InstalledHook,
     settings: settings::UserSettingsStore,
     language_service: language::LanguageService,
     bubble: bubble::BubbleWindow,
@@ -169,7 +170,8 @@ fn main() {
     }
 
     // Install keyboard hook
-    hook::install(msg_hwnd, &bindings);
+    let installed_hook =
+        hook::InstalledHook::install(msg_hwnd, &bindings).expect("Failed to install keyboard hook");
 
     // Force Caps Lock off on startup if intercepting
     if bindings.get(HookKeyCombo::CapsLock).switch_mode != SwitchMode::Unused {
@@ -179,6 +181,7 @@ fn main() {
     // Store app state
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
+            hook: installed_hook,
             settings: settings_store,
             language_service,
             bubble: bubble_win,
@@ -204,7 +207,6 @@ fn main() {
     }
 
     // Cleanup
-    hook::uninstall();
     APP.with(|cell| {
         *cell.borrow_mut() = None;
     });
@@ -509,7 +511,7 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
         }
         tray::TrayCommand::SetSwitchMode { combo, mode } => {
             state.bindings.set_switch_mode(combo, mode);
-            hook::set_mode(combo, mode);
+            state.hook.set_mode(combo, mode);
             settings::report_result(
                 "save key switch mode",
                 state.settings.save_key_switch_mode(combo, mode),

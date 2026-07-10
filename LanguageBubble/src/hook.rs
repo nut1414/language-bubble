@@ -1,10 +1,12 @@
 use std::cell::Cell;
+use std::ptr::NonNull;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::*;
 use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::{Error, HRESULT, Result};
 
 use crate::types::*;
 
@@ -15,12 +17,12 @@ pub const WM_ANY_KEY: u32 = WM_APP + 2;
 
 const SELF_INJECTED_TAG: usize = 0x4C42;
 const VK_CAPITAL_U16: u16 = 0x14;
+const E_UNEXPECTED: HRESULT = HRESULT(0x8000FFFFu32 as i32);
 
 // Global state for the hook callback (must be static since the callback is a C function pointer)
 static SUPPRESS_SELF: AtomicBool = AtomicBool::new(false);
 
 struct HookState {
-    hhook: HHOOK,
     target_hwnd: HWND,
     bindings: KeyBindings,
     win_held: bool,
@@ -33,23 +35,11 @@ struct HookState {
     alt_shift_consumed: bool,
 }
 
-thread_local! {
-    static HOOK: Cell<Option<*mut HookState>> = const { Cell::new(None) };
-}
-
-pub fn set_suppress_self_generated(suppress: bool) {
-    SUPPRESS_SELF.store(suppress, Ordering::SeqCst);
-}
-
-pub fn install(target_hwnd: HWND, bindings: &KeyBindings) {
-    unsafe {
-        let hmod = GetModuleHandleW(None).unwrap_or_default();
-        let hhook =
-            SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(hmod.into()), 0).unwrap();
-        let state = Box::new(HookState {
-            hhook,
+impl HookState {
+    fn new(target_hwnd: HWND, bindings: KeyBindings) -> Self {
+        Self {
             target_hwnd,
-            bindings: *bindings,
+            bindings,
             win_held: false,
             win_used_for_combo: false,
             alt_held: false,
@@ -58,32 +48,59 @@ pub fn install(target_hwnd: HWND, bindings: &KeyBindings) {
             caps_held: false,
             alt_shift_primed: false,
             alt_shift_consumed: false,
-        });
-        HOOK.set(Some(Box::into_raw(state)));
+        }
+    }
+
+    fn set_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
+        self.bindings.set_switch_mode(combo, mode);
     }
 }
 
-pub fn uninstall() {
-    HOOK.with(|cell| {
-        if let Some(ptr) = cell.take() {
-            unsafe {
-                let state = Box::from_raw(ptr);
-                let _ = UnhookWindowsHookEx(state.hhook);
+thread_local! {
+    static HOOK: Cell<Option<NonNull<HookState>>> = const { Cell::new(None) };
+}
+
+pub struct InstalledHook {
+    handle: HHOOK,
+    state: Box<HookState>,
+}
+
+pub fn set_suppress_self_generated(suppress: bool) {
+    SUPPRESS_SELF.store(suppress, Ordering::SeqCst);
+}
+
+impl InstalledHook {
+    pub fn install(target_hwnd: HWND, bindings: &KeyBindings) -> Result<Self> {
+        if HOOK.with(|cell| cell.get().is_some()) {
+            return Err(Error::new(E_UNEXPECTED, "keyboard hook already installed"));
+        }
+
+        let mut state = Box::new(HookState::new(target_hwnd, *bindings));
+        let module = unsafe { GetModuleHandleW(None).unwrap_or_default() };
+        let handle =
+            unsafe { SetWindowsHookExW(WH_KEYBOARD_LL, Some(hook_proc), Some(module.into()), 0)? };
+        let state_pointer = NonNull::from(state.as_mut());
+        HOOK.with(|cell| cell.set(Some(state_pointer)));
+        Ok(Self { handle, state })
+    }
+
+    pub fn set_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
+        self.state.set_mode(combo, mode);
+    }
+}
+
+impl Drop for InstalledHook {
+    fn drop(&mut self) {
+        HOOK.with(|cell| {
+            let pointer = NonNull::from(self.state.as_mut());
+            if cell.get() == Some(pointer) {
+                cell.set(None);
             }
+        });
+        unsafe {
+            let _ = UnhookWindowsHookEx(self.handle);
         }
-    });
-}
-
-pub fn set_mode(combo: HookKeyCombo, mode: SwitchMode) {
-    with_state(|s| s.bindings.set_switch_mode(combo, mode));
-}
-
-fn with_state<F: FnOnce(&mut HookState)>(f: F) {
-    HOOK.with(|cell| {
-        if let Some(ptr) = cell.get() {
-            unsafe { f(&mut *ptr) }
-        }
-    });
+    }
 }
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -93,10 +110,10 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         }
 
         let state_ptr = HOOK.with(|cell| cell.get());
-        let Some(ptr) = state_ptr else {
+        let Some(mut ptr) = state_ptr else {
             return CallNextHookEx(None, code, wparam, lparam);
         };
-        let state = &mut *ptr;
+        let state = ptr.as_mut();
 
         if SUPPRESS_SELF.load(Ordering::SeqCst) {
             return CallNextHookEx(None, code, wparam, lparam);
@@ -274,5 +291,41 @@ unsafe fn inject_ctrl_tap() {
     unsafe {
         inject_key(VK_CONTROL.0, true, true);
         inject_key(VK_CONTROL.0, false, true);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_state_starts_released_with_configured_bindings() {
+        let bindings = KeyBindings::default();
+        let state = HookState::new(HWND::default(), bindings);
+
+        assert_eq!(state.bindings, bindings);
+        assert!(!state.win_held);
+        assert!(!state.win_used_for_combo);
+        assert!(!state.alt_held);
+        assert!(!state.shift_held);
+        assert!(!state.space_held);
+        assert!(!state.caps_held);
+        assert!(!state.alt_shift_primed);
+        assert!(!state.alt_shift_consumed);
+    }
+
+    #[test]
+    fn hook_state_updates_only_selected_mode() {
+        let mut state = HookState::new(HWND::default(), KeyBindings::default());
+        state.set_mode(HookKeyCombo::WinSpace, SwitchMode::Mru);
+
+        assert_eq!(
+            state.bindings.get(HookKeyCombo::WinSpace).switch_mode,
+            SwitchMode::Mru
+        );
+        assert_eq!(
+            state.bindings.get(HookKeyCombo::CapsLock).switch_mode,
+            SwitchMode::AllLanguage
+        );
     }
 }
