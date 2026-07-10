@@ -1,6 +1,6 @@
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Gdi::ClientToScreen;
-use windows::Win32::System::Com::{CoCreateInstance, CLSCTX_INPROC_SERVER};
+use windows::Win32::System::Com::{CLSCTX_INPROC_SERVER, CoCreateInstance};
 use windows::Win32::System::Variant::VARIANT;
 use windows::Win32::UI::Accessibility::*;
 use windows::Win32::UI::HiDpi::*;
@@ -82,7 +82,11 @@ fn try_gui_thread_info() -> Option<ScreenPoint> {
         let _ = LogicalToPhysicalPointForPerMonitorDPI(Some(gui.hwndCaret), &mut pt);
         let _ = LogicalToPhysicalPointForPerMonitorDPI(Some(gui.hwndCaret), &mut pt_top);
 
-        Some(ScreenPoint { x: pt.x, y: pt.y, caret_top: pt_top.y })
+        Some(ScreenPoint {
+            x: pt.x,
+            y: pt.y,
+            caret_top: pt_top.y,
+        })
     }
 }
 
@@ -111,12 +115,8 @@ fn try_msaa_caret() -> Option<ScreenPoint> {
 
         let iid = IAccessible::IID;
         let mut obj: *mut std::ffi::c_void = std::ptr::null_mut();
-        let hr = AccessibleObjectFromWindow(
-            target,
-            OBJID_CARET as u32,
-            &iid as *const GUID,
-            &mut obj,
-        );
+        let hr =
+            AccessibleObjectFromWindow(target, OBJID_CARET as u32, &iid as *const GUID, &mut obj);
         if hr.is_err() || obj.is_null() {
             return None;
         }
@@ -203,8 +203,7 @@ fn try_uia_element_caret(element: &IUIAutomationElement) -> Option<ScreenPoint> 
         }
 
         // Fallback: TextPattern.GetSelection (Office, Edge)
-        if let Ok(pat) =
-            element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
+        if let Ok(pat) = element.GetCurrentPatternAs::<IUIAutomationTextPattern>(UIA_TextPatternId)
             && let Ok(ranges) = pat.GetSelection()
         {
             let len = ranges.Length().unwrap_or(0);
@@ -276,16 +275,8 @@ fn point_from_range(range: &IUIAutomationTextRange) -> Option<ScreenPoint> {
 
 #[link(name = "oleaut32")]
 unsafe extern "system" {
-    fn SafeArrayGetLBound(
-        psa: *mut std::ffi::c_void,
-        ndim: u32,
-        plbound: *mut i32,
-    ) -> i32;
-    fn SafeArrayGetUBound(
-        psa: *mut std::ffi::c_void,
-        ndim: u32,
-        pubound: *mut i32,
-    ) -> i32;
+    fn SafeArrayGetLBound(psa: *mut std::ffi::c_void, ndim: u32, plbound: *mut i32) -> i32;
+    fn SafeArrayGetUBound(psa: *mut std::ffi::c_void, ndim: u32, pubound: *mut i32) -> i32;
     fn SafeArrayGetElement(
         psa: *mut std::ffi::c_void,
         rgindices: *const i32,

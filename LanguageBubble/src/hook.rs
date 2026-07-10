@@ -22,9 +22,7 @@ static SUPPRESS_SELF: AtomicBool = AtomicBool::new(false);
 struct HookState {
     hhook: HHOOK,
     target_hwnd: HWND,
-    caps_lock_mode: SwitchMode,
-    win_space_mode: SwitchMode,
-    alt_shift_mode: SwitchMode,
+    bindings: KeyBindings,
     win_held: bool,
     win_used_for_combo: bool,
     alt_held: bool,
@@ -43,12 +41,7 @@ pub fn set_suppress_self_generated(suppress: bool) {
     SUPPRESS_SELF.store(suppress, Ordering::SeqCst);
 }
 
-pub fn install(
-    target_hwnd: HWND,
-    caps_lock_mode: SwitchMode,
-    win_space_mode: SwitchMode,
-    alt_shift_mode: SwitchMode,
-) {
+pub fn install(target_hwnd: HWND, bindings: &KeyBindings) {
     unsafe {
         let hmod = GetModuleHandleW(None).unwrap_or_default();
         let hhook =
@@ -56,9 +49,7 @@ pub fn install(
         let state = Box::new(HookState {
             hhook,
             target_hwnd,
-            caps_lock_mode,
-            win_space_mode,
-            alt_shift_mode,
+            bindings: *bindings,
             win_held: false,
             win_used_for_combo: false,
             alt_held: false,
@@ -83,16 +74,8 @@ pub fn uninstall() {
     });
 }
 
-pub fn set_caps_lock_mode(mode: SwitchMode) {
-    with_state(|s| s.caps_lock_mode = mode);
-}
-
-pub fn set_win_space_mode(mode: SwitchMode) {
-    with_state(|s| s.win_space_mode = mode);
-}
-
-pub fn set_alt_shift_mode(mode: SwitchMode) {
-    with_state(|s| s.alt_shift_mode = mode);
+pub fn set_mode(combo: HookKeyCombo, mode: SwitchMode) {
+    with_state(|s| s.bindings.set_switch_mode(combo, mode));
 }
 
 fn with_state<F: FnOnce(&mut HookState)>(f: F) {
@@ -105,164 +88,162 @@ fn with_state<F: FnOnce(&mut HookState)>(f: F) {
 
 unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     unsafe {
-    if code < 0 {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    let state_ptr = HOOK.with(|cell| cell.get());
-    let Some(ptr) = state_ptr else {
-        return CallNextHookEx(None, code, wparam, lparam);
-    };
-    let state = &mut *ptr;
-
-    if SUPPRESS_SELF.load(Ordering::SeqCst) {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    let kbd = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-
-    // Skip self-injected events
-    if kbd.dwExtraInfo == SELF_INJECTED_TAG {
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    let vk = kbd.vkCode as u16;
-    let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
-    let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
-
-    // --- Windows key ---
-    if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
-        if is_down {
-            state.win_held = true;
-            state.win_used_for_combo = false;
-        } else if is_up {
-            state.win_held = false;
-            if state.win_used_for_combo {
-                state.win_used_for_combo = false;
-                // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
-                // to prevent Start menu from opening
-                inject_ctrl_tap();
-                inject_key(vk, false, true); // synthetic Win up
-                return LRESULT(1);
-            }
-        }
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    // --- Space (when Win held) ---
-    if vk == VK_SPACE.0 && state.win_held && state.win_space_mode != SwitchMode::Unused {
-        if is_down && !state.space_held {
-            state.space_held = true;
-            state.win_used_for_combo = true;
-            if state.alt_held && state.shift_held {
-                state.alt_shift_consumed = true;
-            }
-            let _ = PostMessageW(
-                Some(state.target_hwnd),
-                WM_SWITCH_KEY,
-                WPARAM(HookKeyCombo::WinSpace as usize),
-                LPARAM(0),
-            );
-        } else if is_up {
-            state.space_held = false;
-        }
-        return LRESULT(1); // Suppress both down and up
-    }
-
-    // --- Alt key ---
-    if vk == VK_LMENU.0 || vk == VK_RMENU.0 || vk == VK_MENU.0 {
-        if is_down {
-            let was_held = state.alt_held;
-            state.alt_held = true;
-            if !was_held && state.shift_held {
-                state.alt_shift_primed = true;
-                state.alt_shift_consumed = false;
-            }
-        } else if is_up {
-            state.alt_held = false;
-            if state.alt_shift_primed
-                && !state.alt_shift_consumed
-                && state.alt_shift_mode != SwitchMode::Unused
-            {
-                inject_ctrl_tap();
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::AltShift as usize),
-                    LPARAM(0),
-                );
-            }
-            state.alt_shift_primed = false;
-            state.alt_shift_consumed = false;
-        }
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    // --- Shift key ---
-    if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 || vk == VK_SHIFT.0 {
-        if is_down {
-            let was_held = state.shift_held;
-            state.shift_held = true;
-            if !was_held && state.alt_held {
-                state.alt_shift_primed = true;
-                state.alt_shift_consumed = false;
-            }
-        } else if is_up {
-            state.shift_held = false;
-            if state.alt_shift_primed
-                && !state.alt_shift_consumed
-                && state.alt_shift_mode != SwitchMode::Unused
-            {
-                inject_ctrl_tap();
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::AltShift as usize),
-                    LPARAM(0),
-                );
-            }
-            state.alt_shift_primed = false;
-            state.alt_shift_consumed = false;
-        }
-        return CallNextHookEx(None, code, wparam, lparam);
-    }
-
-    // --- CapsLock ---
-    if vk == VK_CAPITAL_U16 {
-        if state.caps_lock_mode == SwitchMode::Unused {
+        if code < 0 {
             return CallNextHookEx(None, code, wparam, lparam);
         }
-        if is_down && !state.caps_held {
-            state.caps_held = true;
+
+        let state_ptr = HOOK.with(|cell| cell.get());
+        let Some(ptr) = state_ptr else {
+            return CallNextHookEx(None, code, wparam, lparam);
+        };
+        let state = &mut *ptr;
+
+        if SUPPRESS_SELF.load(Ordering::SeqCst) {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        let kbd = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
+
+        // Skip self-injected events
+        if kbd.dwExtraInfo == SELF_INJECTED_TAG {
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        let vk = kbd.vkCode as u16;
+        let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
+        let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
+
+        // --- Windows key ---
+        if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
+            if is_down {
+                state.win_held = true;
+                state.win_used_for_combo = false;
+            } else if is_up {
+                state.win_held = false;
+                if state.win_used_for_combo {
+                    state.win_used_for_combo = false;
+                    // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
+                    // to prevent Start menu from opening
+                    inject_ctrl_tap();
+                    inject_key(vk, false, true); // synthetic Win up
+                    return LRESULT(1);
+                }
+            }
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // --- Space (when Win held) ---
+        if vk == VK_SPACE.0
+            && state.win_held
+            && state.bindings.get(HookKeyCombo::WinSpace).switch_mode != SwitchMode::Unused
+        {
+            if is_down && !state.space_held {
+                state.space_held = true;
+                state.win_used_for_combo = true;
+                if state.alt_held && state.shift_held {
+                    state.alt_shift_consumed = true;
+                }
+                let _ = PostMessageW(
+                    Some(state.target_hwnd),
+                    WM_SWITCH_KEY,
+                    WPARAM(HookKeyCombo::WinSpace as usize),
+                    LPARAM(0),
+                );
+            } else if is_up {
+                state.space_held = false;
+            }
+            return LRESULT(1); // Suppress both down and up
+        }
+
+        // --- Alt key ---
+        if vk == VK_LMENU.0 || vk == VK_RMENU.0 || vk == VK_MENU.0 {
+            if is_down {
+                let was_held = state.alt_held;
+                state.alt_held = true;
+                if !was_held && state.shift_held {
+                    state.alt_shift_primed = true;
+                    state.alt_shift_consumed = false;
+                }
+            } else if is_up {
+                state.alt_held = false;
+                if state.alt_shift_primed
+                    && !state.alt_shift_consumed
+                    && state.bindings.get(HookKeyCombo::AltShift).switch_mode != SwitchMode::Unused
+                {
+                    inject_ctrl_tap();
+                    let _ = PostMessageW(
+                        Some(state.target_hwnd),
+                        WM_SWITCH_KEY,
+                        WPARAM(HookKeyCombo::AltShift as usize),
+                        LPARAM(0),
+                    );
+                }
+                state.alt_shift_primed = false;
+                state.alt_shift_consumed = false;
+            }
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // --- Shift key ---
+        if vk == VK_LSHIFT.0 || vk == VK_RSHIFT.0 || vk == VK_SHIFT.0 {
+            if is_down {
+                let was_held = state.shift_held;
+                state.shift_held = true;
+                if !was_held && state.alt_held {
+                    state.alt_shift_primed = true;
+                    state.alt_shift_consumed = false;
+                }
+            } else if is_up {
+                state.shift_held = false;
+                if state.alt_shift_primed
+                    && !state.alt_shift_consumed
+                    && state.bindings.get(HookKeyCombo::AltShift).switch_mode != SwitchMode::Unused
+                {
+                    inject_ctrl_tap();
+                    let _ = PostMessageW(
+                        Some(state.target_hwnd),
+                        WM_SWITCH_KEY,
+                        WPARAM(HookKeyCombo::AltShift as usize),
+                        LPARAM(0),
+                    );
+                }
+                state.alt_shift_primed = false;
+                state.alt_shift_consumed = false;
+            }
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // --- CapsLock ---
+        if vk == VK_CAPITAL_U16 {
+            if state.bindings.get(HookKeyCombo::CapsLock).switch_mode == SwitchMode::Unused {
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
+            if is_down && !state.caps_held {
+                state.caps_held = true;
+                if state.alt_held && state.shift_held {
+                    state.alt_shift_consumed = true;
+                }
+                let _ = PostMessageW(
+                    Some(state.target_hwnd),
+                    WM_SWITCH_KEY,
+                    WPARAM(HookKeyCombo::CapsLock as usize),
+                    LPARAM(0),
+                );
+            } else if is_up {
+                state.caps_held = false;
+            }
+            return LRESULT(1); // Suppress both down and up
+        }
+
+        // --- All other keys ---
+        if is_down {
             if state.alt_held && state.shift_held {
                 state.alt_shift_consumed = true;
             }
-            let _ = PostMessageW(
-                Some(state.target_hwnd),
-                WM_SWITCH_KEY,
-                WPARAM(HookKeyCombo::CapsLock as usize),
-                LPARAM(0),
-            );
-        } else if is_up {
-            state.caps_held = false;
+            let _ = PostMessageW(Some(state.target_hwnd), WM_ANY_KEY, WPARAM(0), LPARAM(0));
         }
-        return LRESULT(1); // Suppress both down and up
-    }
 
-    // --- All other keys ---
-    if is_down {
-        if state.alt_held && state.shift_held {
-            state.alt_shift_consumed = true;
-        }
-        let _ = PostMessageW(
-            Some(state.target_hwnd),
-            WM_ANY_KEY,
-            WPARAM(0),
-            LPARAM(0),
-        );
-    }
-
-    CallNextHookEx(None, code, wparam, lparam)
+        CallNextHookEx(None, code, wparam, lparam)
     }
 }
 

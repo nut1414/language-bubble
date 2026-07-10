@@ -1,6 +1,6 @@
-use windows::core::{w, PCWSTR};
 use windows::ApplicationModel::{Package, StartupTask, StartupTaskState};
 use windows::Win32::System::Registry::*;
+use windows::core::{PCWSTR, w};
 
 use crate::types::*;
 
@@ -8,6 +8,37 @@ const SUBKEY: PCWSTR = w!("Software\\LanguageBubble");
 const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const APP_NAME: PCWSTR = w!("LanguageBubble");
 const STARTUP_TASK_ID: &str = "LanguageBubbleStartup";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct KeyBindingSettings {
+    switch_key: &'static str,
+    display_key: &'static str,
+    default_switch_mode: SwitchMode,
+    default_display_mode: DisplayMode,
+}
+
+const fn key_binding_settings(combo: HookKeyCombo) -> KeyBindingSettings {
+    match combo {
+        HookKeyCombo::CapsLock => KeyBindingSettings {
+            switch_key: "CapsLockMode",
+            display_key: "CapsLockDisplayMode",
+            default_switch_mode: SwitchMode::AllLanguage,
+            default_display_mode: DisplayMode::Carousel,
+        },
+        HookKeyCombo::WinSpace => KeyBindingSettings {
+            switch_key: "WinSpaceMode",
+            display_key: "WinSpaceDisplayMode",
+            default_switch_mode: SwitchMode::Unused,
+            default_display_mode: DisplayMode::Carousel,
+        },
+        HookKeyCombo::AltShift => KeyBindingSettings {
+            switch_key: "AltShiftMode",
+            display_key: "AltShiftDisplayMode",
+            default_switch_mode: SwitchMode::Unused,
+            default_display_mode: DisplayMode::Carousel,
+        },
+    }
+}
 
 pub fn is_msix_packaged() -> bool {
     Package::Current().is_ok()
@@ -43,13 +74,7 @@ fn read_string(key_name: PCWSTR) -> Option<String> {
 fn write_string(key_name: PCWSTR, value: &str) {
     unsafe {
         let mut hkey = HKEY::default();
-        if RegCreateKeyW(
-            HKEY_CURRENT_USER,
-            SUBKEY,
-            &mut hkey,
-        )
-        .is_err()
-        {
+        if RegCreateKeyW(HKEY_CURRENT_USER, SUBKEY, &mut hkey).is_err() {
             return;
         }
         let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
@@ -67,14 +92,14 @@ fn write_string(key_name: PCWSTR, value: &str) {
     }
 }
 
-pub fn get_key_mode(key_name: &str, default: SwitchMode) -> SwitchMode {
+fn get_key_mode(key_name: &str, default: SwitchMode) -> SwitchMode {
     let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
     read_string(PCWSTR(wide.as_ptr()))
         .map(|s| SwitchMode::from_str(&s))
         .unwrap_or(default)
 }
 
-pub fn save_key_mode(key_name: &str, mode: SwitchMode) {
+fn save_key_mode(key_name: &str, mode: SwitchMode) {
     let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
     write_string(PCWSTR(wide.as_ptr()), mode.as_str());
 }
@@ -89,16 +114,40 @@ pub fn save_bubble_size(size: BubbleSize) {
     write_string(w!("Size"), size.as_str());
 }
 
-pub fn get_key_display_mode(key_name: &str, default: DisplayMode) -> DisplayMode {
+fn get_key_display_mode(key_name: &str, default: DisplayMode) -> DisplayMode {
     let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
     read_string(PCWSTR(wide.as_ptr()))
         .map(|s| DisplayMode::from_str(&s))
         .unwrap_or(default)
 }
 
-pub fn save_key_display_mode(key_name: &str, mode: DisplayMode) {
+fn save_key_display_mode_by_name(key_name: &str, mode: DisplayMode) {
     let wide: Vec<u16> = key_name.encode_utf16().chain(std::iter::once(0)).collect();
     write_string(PCWSTR(wide.as_ptr()), mode.as_str());
+}
+
+pub fn load_key_bindings() -> KeyBindings {
+    let mut bindings = KeyBindings::default();
+    for combo in HookKeyCombo::ALL {
+        let descriptor = key_binding_settings(combo);
+        bindings.set_switch_mode(
+            combo,
+            get_key_mode(descriptor.switch_key, descriptor.default_switch_mode),
+        );
+        bindings.set_display_mode(
+            combo,
+            get_key_display_mode(descriptor.display_key, descriptor.default_display_mode),
+        );
+    }
+    bindings
+}
+
+pub fn save_key_switch_mode(combo: HookKeyCombo, mode: SwitchMode) {
+    save_key_mode(key_binding_settings(combo).switch_key, mode);
+}
+
+pub fn save_key_display_mode(combo: HookKeyCombo, mode: DisplayMode) {
+    save_key_display_mode_by_name(key_binding_settings(combo).display_key, mode);
 }
 
 pub fn get_hide_on_typing() -> bool {
@@ -151,8 +200,14 @@ pub fn get_custom_theme_colors() -> CustomThemeColors {
 }
 
 pub fn save_custom_theme_colors(colors: &CustomThemeColors) {
-    write_string(w!("CustomBG"), &format!("{:06X}", colors.bg_color & 0x00FFFFFF));
-    write_string(w!("CustomFG"), &format!("{:06X}", colors.fg_color & 0x00FFFFFF));
+    write_string(
+        w!("CustomBG"),
+        &format!("{:06X}", colors.bg_color & 0x00FFFFFF),
+    );
+    write_string(
+        w!("CustomFG"),
+        &format!("{:06X}", colors.fg_color & 0x00FFFFFF),
+    );
     write_string(w!("CustomOpacity"), &colors.opacity.to_string());
 }
 
@@ -250,7 +305,10 @@ pub fn get_check_for_updates() -> bool {
 }
 
 pub fn save_check_for_updates(enabled: bool) {
-    write_string(w!("CheckForUpdates"), if enabled { "True" } else { "False" });
+    write_string(
+        w!("CheckForUpdates"),
+        if enabled { "True" } else { "False" },
+    );
 }
 
 pub fn get_last_update_check() -> u64 {
@@ -305,4 +363,40 @@ pub fn migrate_display_mode_settings() {
     write_string(w!("CapsLockDisplayMode"), mode.as_str());
     write_string(w!("WinSpaceDisplayMode"), mode.as_str());
     write_string(w!("AltShiftDisplayMode"), mode.as_str());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn key_binding_registry_names_and_defaults_are_stable() {
+        assert_eq!(
+            key_binding_settings(HookKeyCombo::CapsLock),
+            KeyBindingSettings {
+                switch_key: "CapsLockMode",
+                display_key: "CapsLockDisplayMode",
+                default_switch_mode: SwitchMode::AllLanguage,
+                default_display_mode: DisplayMode::Carousel,
+            }
+        );
+        assert_eq!(
+            key_binding_settings(HookKeyCombo::WinSpace),
+            KeyBindingSettings {
+                switch_key: "WinSpaceMode",
+                display_key: "WinSpaceDisplayMode",
+                default_switch_mode: SwitchMode::Unused,
+                default_display_mode: DisplayMode::Carousel,
+            }
+        );
+        assert_eq!(
+            key_binding_settings(HookKeyCombo::AltShift),
+            KeyBindingSettings {
+                switch_key: "AltShiftMode",
+                display_key: "AltShiftDisplayMode",
+                default_switch_mode: SwitchMode::Unused,
+                default_display_mode: DisplayMode::Carousel,
+            }
+        );
+    }
 }
