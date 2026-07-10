@@ -20,7 +20,7 @@ impl Drop for HttpHandle {
     }
 }
 
-pub fn check_in_background(hwnd: HWND) {
+pub fn check_in_background(hwnd: HWND, settings: crate::settings::UserSettingsStore) {
     let hwnd_value = hwnd.0 as isize;
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_value as *mut _);
@@ -30,13 +30,19 @@ pub fn check_in_background(hwnd: HWND) {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            crate::settings::save_last_update_check(now);
+            crate::settings::report_result(
+                "save last update check",
+                settings.save_last_update_check(now),
+            );
 
             let current = env!("CARGO_PKG_VERSION");
-            let old_last_seen = crate::settings::get_last_seen_version();
+            let old_last_seen = settings.last_seen_version();
 
             if is_newer(&tag, &old_last_seen) {
-                crate::settings::save_last_seen_version(&tag);
+                crate::settings::report_result(
+                    "save last seen version",
+                    settings.save_last_seen_version(&tag),
+                );
             }
 
             if is_newer(&tag, current)
@@ -212,9 +218,9 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 /// On startup, restore the "Download update..." menu entry if the registry says
 /// we previously saw a release newer than what's currently installed.
-pub fn pending_from_registry() -> Option<String> {
+pub fn pending_from_registry(settings: crate::settings::UserSettingsStore) -> Option<String> {
     let current = env!("CARGO_PKG_VERSION");
-    let last_seen = crate::settings::get_last_seen_version();
+    let last_seen = settings.last_seen_version();
     if last_seen.is_empty() || !is_valid_tag(&last_seen) {
         return None;
     }

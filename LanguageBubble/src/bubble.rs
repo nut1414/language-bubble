@@ -18,6 +18,7 @@ use crate::bubble_layout::{
 };
 use crate::caret::ScreenPoint;
 use crate::language::LayoutInfo;
+use crate::registry::RegistryKey;
 use crate::types::*;
 
 const CLASS_NAME: PCWSTR = w!("LanguageBubbleOverlay");
@@ -694,25 +695,15 @@ fn resolve_dark_mode(theme_mode: ThemeMode) -> bool {
 }
 
 fn is_dark_mode() -> bool {
-    use windows::Win32::System::Registry::*;
-    unsafe {
-        let mut hkey = HKEY::default();
-        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, Some(0), KEY_READ, &mut hkey).is_err() {
-            return true;
-        }
-        let mut val: u32 = 1;
-        let mut size = mem::size_of::<u32>() as u32;
-        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-        let result = RegQueryValueExW(
-            hkey,
-            w!("AppsUseLightTheme"),
-            None,
-            Some(&mut kind),
-            Some(&mut val as *mut u32 as *mut u8),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(hkey);
-        if result.is_ok() { val == 0 } else { true }
-    }
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ};
+
+    let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let Ok(Some(key)) = RegistryKey::open_optional(HKEY_CURRENT_USER, subkey, KEY_READ) else {
+        return true;
+    };
+    key.query_u32(w!("AppsUseLightTheme"))
+        .ok()
+        .flatten()
+        .map(|value| value == 0)
+        .unwrap_or(true)
 }

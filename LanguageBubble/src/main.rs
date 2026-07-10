@@ -7,6 +7,7 @@ mod capslock;
 mod caret;
 mod hook;
 mod language;
+mod registry;
 mod settings;
 mod tray;
 mod types;
@@ -31,6 +32,7 @@ const WM_SETTINGCHANGE: u32 = 0x001A;
 const DPI_AWARENESS_CONTEXT_PMV2: isize = -4;
 
 struct AppState {
+    settings: settings::UserSettingsStore,
     language_service: language::LanguageService,
     bubble: bubble::BubbleWindow,
     _tray: tray::TrayIcon,
@@ -42,6 +44,29 @@ struct AppState {
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
     pending_update: Option<String>,
+}
+
+impl AppState {
+    fn tray_menu_snapshot(&self) -> tray::TrayMenuSnapshot {
+        tray::TrayMenuSnapshot {
+            layouts: self.language_service.layouts().to_vec(),
+            current_hkl: self
+                .language_service
+                .get_current_layout()
+                .map(|layout| layout.hkl),
+            start_with_windows: settings::is_start_with_windows(),
+            size: self.bubble.size,
+            bindings: self.bindings,
+            hide_on_typing: self.hide_on_typing,
+            expanded_mru_only: self.expanded_mru_only,
+            theme_mode: self.theme_mode,
+            custom_colors: self.custom_colors,
+            check_for_updates: self.settings.check_for_updates(),
+            pending_update: self.pending_update.clone(),
+            app_version: env!("CARGO_PKG_VERSION"),
+            is_msix: settings::is_msix_packaged(),
+        }
+    }
 }
 
 // Everything runs on the main (message pump) thread, so thread_local RefCell is safe.
@@ -88,17 +113,24 @@ fn main() {
         h
     };
 
-    settings::migrate_old_settings();
-    settings::migrate_display_mode_settings();
+    let settings_store = settings::UserSettingsStore::registry();
+    settings::report_result(
+        "migrate old settings",
+        settings_store.migrate_old_settings(),
+    );
+    settings::report_result(
+        "migrate display settings",
+        settings_store.migrate_display_mode_settings(),
+    );
 
-    let bindings = settings::load_key_bindings();
-    let hide_on_typing = settings::get_hide_on_typing();
-    let expanded_mru_only = settings::get_expanded_mru_only();
-    let theme_mode = settings::get_theme_mode();
-    let custom_colors = settings::get_custom_theme_colors();
+    let bindings = settings_store.load_key_bindings();
+    let hide_on_typing = settings_store.hide_on_typing();
+    let expanded_mru_only = settings_store.expanded_mru_only();
+    let theme_mode = settings_store.theme_mode();
+    let custom_colors = settings_store.custom_theme_colors();
 
     // Restore pending update from registry (if any)
-    let pending_update = update::pending_from_registry();
+    let pending_update = update::pending_from_registry(settings_store);
 
     // Create message-only window
     let msg_hwnd = create_msg_window();
@@ -113,7 +145,7 @@ fn main() {
     // Bubble window
     let mut bubble_win =
         bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
-    bubble_win.set_size(settings::get_bubble_size());
+    bubble_win.set_size(settings_store.bubble_size());
     bubble_win.set_theme_mode(theme_mode);
     bubble_win.set_custom_colors(custom_colors);
 
@@ -125,14 +157,14 @@ fn main() {
     );
 
     // Check for updates (non-MSIX only)
-    if !settings::is_msix_packaged() && settings::get_check_for_updates() {
-        let last_check = settings::get_last_update_check();
+    if !settings::is_msix_packaged() && settings_store.check_for_updates() {
+        let last_check = settings_store.last_update_check();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
         if now.saturating_sub(last_check) > 24 * 3600 {
-            update::check_in_background(msg_hwnd);
+            update::check_in_background(msg_hwnd, settings_store);
         }
     }
 
@@ -147,6 +179,7 @@ fn main() {
     // Store app state
     APP.with(|cell| {
         *cell.borrow_mut() = Some(AppState {
+            settings: settings_store,
             language_service,
             bubble: bubble_win,
             _tray: tray_icon,
@@ -372,56 +405,10 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
 }
 
 fn on_tray_right_click(hwnd: HWND) {
-    let data = with_app(|state| {
-        (
-            state.language_service.layouts().to_vec(),
-            state.language_service.get_current_layout().map(|l| l.hkl),
-            settings::is_start_with_windows(),
-            state.bubble.size,
-            state.bindings,
-            state.hide_on_typing,
-            state.expanded_mru_only,
-            state.theme_mode,
-            state.custom_colors,
-            state.pending_update.clone(),
-        )
-    });
-
-    let Some((
-        layouts,
-        current_hkl,
-        start_with_windows,
-        size,
-        bindings,
-        hot,
-        emru,
-        theme,
-        cc,
-        pending_update,
-    )) = data
-    else {
+    let Some(snapshot) = with_app(|state| state.tray_menu_snapshot()) else {
         return;
     };
-
-    let is_msix = settings::is_msix_packaged();
-    let app_version = env!("CARGO_PKG_VERSION");
-
-    let Some(cmd) = tray::show_context_menu(tray::ContextMenuParams {
-        hwnd,
-        layouts: &layouts,
-        current_hkl,
-        start_with_windows,
-        size,
-        bindings: &bindings,
-        hide_on_typing: hot,
-        expanded_mru_only: emru,
-        theme_mode: theme,
-        custom_colors: &cc,
-        check_for_updates: settings::get_check_for_updates(),
-        pending_update: pending_update.as_deref(),
-        app_version,
-        is_msix,
-    }) else {
+    let Some(cmd) = tray::show_context_menu(hwnd, &snapshot) else {
         return;
     };
 
@@ -436,7 +423,12 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
                 with_app(|state| {
                     state.custom_colors.bg_color = new_color;
                     state.bubble.set_custom_colors(state.custom_colors);
-                    settings::save_custom_theme_colors(&state.custom_colors);
+                    settings::report_result(
+                        "save custom theme colors",
+                        state
+                            .settings
+                            .save_custom_theme_colors(&state.custom_colors),
+                    );
                 });
             }
             return;
@@ -447,7 +439,12 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
                 with_app(|state| {
                     state.custom_colors.fg_color = new_color;
                     state.bubble.set_custom_colors(state.custom_colors);
-                    settings::save_custom_theme_colors(&state.custom_colors);
+                    settings::report_result(
+                        "save custom theme colors",
+                        state
+                            .settings
+                            .save_custom_theme_colors(&state.custom_colors),
+                    );
                 });
             }
             return;
@@ -470,8 +467,11 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
             );
         },
         tray::TrayCommand::ToggleUpdateChecks => {
-            let current = settings::get_check_for_updates();
-            settings::save_check_for_updates(!current);
+            let current = state.settings.check_for_updates();
+            settings::report_result(
+                "save update preference",
+                state.settings.save_check_for_updates(!current),
+            );
         }
         tray::TrayCommand::DownloadUpdate => unsafe {
             let _ = windows::Win32::UI::Shell::ShellExecuteW(
@@ -489,37 +489,56 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
         }
         tray::TrayCommand::ToggleHideOnTyping => {
             state.hide_on_typing = !state.hide_on_typing;
-            settings::save_hide_on_typing(state.hide_on_typing);
+            settings::report_result(
+                "save hide-on-typing preference",
+                state.settings.save_hide_on_typing(state.hide_on_typing),
+            );
         }
         tray::TrayCommand::ToggleExpandedMruOnly => {
             state.expanded_mru_only = !state.expanded_mru_only;
-            settings::save_expanded_mru_only(state.expanded_mru_only);
+            settings::report_result(
+                "save expanded MRU preference",
+                state
+                    .settings
+                    .save_expanded_mru_only(state.expanded_mru_only),
+            );
         }
         tray::TrayCommand::SetSize(size) => {
             state.bubble.set_size(size);
-            settings::save_bubble_size(size);
+            settings::report_result("save bubble size", state.settings.save_bubble_size(size));
         }
         tray::TrayCommand::SetSwitchMode { combo, mode } => {
             state.bindings.set_switch_mode(combo, mode);
             hook::set_mode(combo, mode);
-            settings::save_key_switch_mode(combo, mode);
+            settings::report_result(
+                "save key switch mode",
+                state.settings.save_key_switch_mode(combo, mode),
+            );
             if combo == HookKeyCombo::CapsLock && mode != SwitchMode::Unused {
                 capslock::ensure_caps_lock_off();
             }
         }
         tray::TrayCommand::SetDisplayMode { combo, mode } => {
             state.bindings.set_display_mode(combo, mode);
-            settings::save_key_display_mode(combo, mode);
+            settings::report_result(
+                "save key display mode",
+                state.settings.save_key_display_mode(combo, mode),
+            );
         }
         tray::TrayCommand::SetTheme(mode) => {
             state.theme_mode = mode;
             state.bubble.set_theme_mode(mode);
-            settings::save_theme_mode(mode);
+            settings::report_result("save theme mode", state.settings.save_theme_mode(mode));
         }
         tray::TrayCommand::SetOpacity(opacity) => {
             state.custom_colors.opacity = opacity;
             state.bubble.set_custom_colors(state.custom_colors);
-            settings::save_custom_theme_colors(&state.custom_colors);
+            settings::report_result(
+                "save custom theme colors",
+                state
+                    .settings
+                    .save_custom_theme_colors(&state.custom_colors),
+            );
         }
         tray::TrayCommand::PickCustomBackground | tray::TrayCommand::PickCustomForeground => {
             unreachable!()

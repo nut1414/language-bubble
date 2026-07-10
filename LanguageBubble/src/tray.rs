@@ -269,40 +269,36 @@ fn load_embedded_icon() -> Option<HICON> {
     }
 }
 
-pub struct ContextMenuParams<'a> {
-    pub hwnd: HWND,
-    pub layouts: &'a [crate::language::LayoutInfo],
+pub struct TrayMenuSnapshot {
+    pub layouts: Vec<crate::language::LayoutInfo>,
     pub current_hkl: Option<windows::Win32::UI::Input::KeyboardAndMouse::HKL>,
     pub start_with_windows: bool,
     pub size: BubbleSize,
-    pub bindings: &'a KeyBindings,
+    pub bindings: KeyBindings,
     pub hide_on_typing: bool,
     pub expanded_mru_only: bool,
     pub theme_mode: ThemeMode,
-    pub custom_colors: &'a CustomThemeColors,
+    pub custom_colors: CustomThemeColors,
     pub check_for_updates: bool,
-    pub pending_update: Option<&'a str>,
-    pub app_version: &'a str,
+    pub pending_update: Option<String>,
+    pub app_version: &'static str,
     pub is_msix: bool,
 }
 
-pub fn show_context_menu(p: ContextMenuParams) -> Option<TrayCommand> {
-    let ContextMenuParams {
-        hwnd,
-        layouts,
-        current_hkl,
-        start_with_windows,
-        size,
-        bindings,
-        hide_on_typing,
-        expanded_mru_only,
-        theme_mode,
-        custom_colors,
-        check_for_updates,
-        pending_update,
-        app_version,
-        is_msix,
-    } = p;
+pub fn show_context_menu(hwnd: HWND, snapshot: &TrayMenuSnapshot) -> Option<TrayCommand> {
+    let layouts = &snapshot.layouts;
+    let current_hkl = snapshot.current_hkl;
+    let start_with_windows = snapshot.start_with_windows;
+    let size = snapshot.size;
+    let bindings = snapshot.bindings;
+    let hide_on_typing = snapshot.hide_on_typing;
+    let expanded_mru_only = snapshot.expanded_mru_only;
+    let theme_mode = snapshot.theme_mode;
+    let custom_colors = &snapshot.custom_colors;
+    let check_for_updates = snapshot.check_for_updates;
+    let pending_update = snapshot.pending_update.as_deref();
+    let app_version = snapshot.app_version;
+    let is_msix = snapshot.is_msix;
     unsafe {
         let menu = CreatePopupMenu().ok()?;
 
