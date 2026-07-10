@@ -12,6 +12,10 @@ use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
 use crate::animation::*;
+use crate::bubble_layout::{
+    CaretAnchor, PixelSize, PlacementContext, WorkArea, calculate_window_size, center_in_work_area,
+    place_at_caret,
+};
 use crate::caret::ScreenPoint;
 use crate::language::LayoutInfo;
 use crate::types::*;
@@ -219,17 +223,9 @@ impl BubbleWindow {
         self.selected_index = selected;
         // Compute window size
         let metrics = self.size.metrics();
-        let count = self.labels.len() as f32;
-        let (content_w, content_h) = match self.display_mode {
-            DisplayMode::Expanded if self.labels.len() > 1 => {
-                (count * metrics.item_width, metrics.item_height)
-            }
-            _ => (metrics.item_width, metrics.item_height),
-        };
-        // Scale DIP dimensions to physical pixels for SetWindowPos under PMv2
         let dpi_scale = self.get_dpi_scale();
-        let win_w = ((content_w + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
-        let win_h = ((content_h + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
+        let window_size =
+            calculate_window_size(metrics, self.display_mode, self.labels.len(), dpi_scale);
 
         // Resize and position
         unsafe {
@@ -238,8 +234,8 @@ impl BubbleWindow {
                 Some(HWND_TOPMOST),
                 0,
                 0,
-                win_w,
-                win_h,
+                window_size.width,
+                window_size.height,
                 SWP_NOMOVE | SWP_NOACTIVATE,
             )
             .ok();
@@ -254,26 +250,28 @@ impl BubbleWindow {
             && let Some(caret_pt) = caret
         {
             // EXPANDED SLIDE: compute target without moving the window yet
-            let target_x = self.compute_expanded_x(caret_pt, selected, win_w);
-            let target_y = self.compute_caret_y(caret_pt, win_w, win_h);
+            let target = place_at_caret(
+                self.placement_context(caret_pt, window_size),
+                CaretAnchor::SelectedItem(selected),
+            );
 
             // Start animation from current position to target
             let delta = selected - self.previous_selected_index;
             let dpi_scale = self.get_dpi_scale();
             let offset = (delta as f32 * metrics.item_width * dpi_scale) as i32;
-            let nominal_from = target_x + offset;
-            self.anim.begin_window_slide(nominal_from, target_x);
+            let nominal_from = target.x + offset;
+            self.anim.begin_window_slide(nominal_from, target.x);
 
             // Place window at the animation's actual start position (not the target!)
             let start_x = self.anim.win_slide_from_x;
-            self.desired_phys_x = target_x;
-            self.desired_phys_y = target_y;
+            self.desired_phys_x = target.x;
+            self.desired_phys_y = target.y;
             unsafe {
                 let _ = SetWindowPos(
                     self.hwnd,
                     Some(HWND_TOPMOST),
                     start_x,
-                    target_y,
+                    target.y,
                     0,
                     0,
                     SWP_NOSIZE | SWP_NOACTIVATE,
@@ -283,9 +281,9 @@ impl BubbleWindow {
         } else if can_slide && self.display_mode == DisplayMode::Carousel {
             // CAROUSEL SLIDE: position window, animate row offset
             if let Some(caret_pt) = caret {
-                self.position_at_caret(caret_pt);
+                self.position_at_caret(caret_pt, window_size, CaretAnchor::Center);
             } else {
-                self.center_on_screen();
+                self.center_on_screen(window_size);
             }
             let from = -self.previous_selected_index as f32 * metrics.item_width;
             let to = -selected as f32 * metrics.item_width;
@@ -295,12 +293,16 @@ impl BubbleWindow {
             // FIRST SHOW / SIMPLE: position and fade in
             if let Some(caret_pt) = caret {
                 if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                    self.position_at_caret_expanded(caret_pt, selected);
+                    self.position_at_caret(
+                        caret_pt,
+                        window_size,
+                        CaretAnchor::SelectedItem(selected),
+                    );
                 } else {
-                    self.position_at_caret(caret_pt);
+                    self.position_at_caret(caret_pt, window_size, CaretAnchor::Center);
                 }
             } else {
-                self.center_on_screen();
+                self.center_on_screen(window_size);
             }
             self.anim.slide_to = -(selected as f32) * metrics.item_width;
             self.anim.slide_from = self.anim.slide_to;
@@ -576,208 +578,58 @@ impl BubbleWindow {
         }
     }
 
-    fn position_at_caret(&mut self, phys_pt: ScreenPoint) {
+    fn placement_context(&self, phys_pt: ScreenPoint, window_size: PixelSize) -> PlacementContext {
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let mut x = phys_pt.x - bw / 2;
-            let mut y = phys_pt.y + caret_offset;
-
-            // Clamp to monitor work area
-            let pt = POINT {
+            let point = POINT {
                 x: phys_pt.x,
                 y: phys_pt.y,
             };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
+            let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
+            let _ = GetMonitorInfoW(monitor, &mut mi);
+            PlacementContext {
+                caret: phys_pt,
+                work_area: work_area_from_rect(mi.rcWork),
+                window_size,
+                dpi_scale: self.get_dpi_scale(),
+                metrics: self.size.metrics(),
             }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
-            }
-
-            self.set_physical_position(x, y);
         }
     }
 
-    fn position_at_caret_expanded(&mut self, phys_pt: ScreenPoint, selected: i32) {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let metrics = self.size.metrics();
-            let selected_center_dip =
-                metrics.padding + selected as f32 * metrics.item_width + metrics.item_width / 2.0;
-            let selected_center_phys = (selected_center_dip * dpi_scale) as i32;
-
-            let mut x = phys_pt.x - selected_center_phys;
-            let mut y = phys_pt.y + caret_offset;
-
-            // Clamp to monitor
-            let pt = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
-            }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
-            }
-
-            self.set_physical_position(x, y);
-        }
+    fn position_at_caret(
+        &mut self,
+        phys_pt: ScreenPoint,
+        window_size: PixelSize,
+        anchor: CaretAnchor,
+    ) {
+        let point = place_at_caret(self.placement_context(phys_pt, window_size), anchor);
+        self.set_physical_position(point.x, point.y);
     }
 
-    /// Compute the target X position for expanded mode without moving the window.
-    fn compute_expanded_x(&self, phys_pt: ScreenPoint, selected: i32, _win_w: i32) -> i32 {
+    fn center_on_screen(&mut self, window_size: PixelSize) {
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-
-            let metrics = self.size.metrics();
-            let selected_center_dip =
-                metrics.padding + selected as f32 * metrics.item_width + metrics.item_width / 2.0;
-            let selected_center_phys = (selected_center_dip * dpi_scale) as i32;
-
-            let mut x = phys_pt.x - selected_center_phys;
-
-            // Clamp to monitor
-            let pt = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
-            }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            x
-        }
-    }
-
-    /// Compute the target Y position for caret-relative placement.
-    fn compute_caret_y(&self, phys_pt: ScreenPoint, _win_w: i32, _win_h: i32) -> i32 {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bh = rect.bottom - rect.top;
-
-            let mut y = phys_pt.y + caret_offset;
-
-            let pt = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
-            }
-            y
-        }
-    }
-
-    fn center_on_screen(&mut self) {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let fg = GetForegroundWindow();
-            let hmon = if !fg.is_invalid() {
-                MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+            let foreground = GetForegroundWindow();
+            let monitor = if !foreground.is_invalid() {
+                MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
             } else {
                 let mut cursor = POINT::default();
                 let _ = GetCursorPos(&mut cursor);
                 MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
             };
-
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
+            let _ = GetMonitorInfoW(monitor, &mut mi);
+            let point = center_in_work_area(work_area_from_rect(mi.rcWork), window_size);
 
-            let work_w = mi.rcWork.right - mi.rcWork.left;
-            let work_h = mi.rcWork.bottom - mi.rcWork.top;
-            let x = mi.rcWork.left + (work_w - bw) / 2;
-            let y = mi.rcWork.top + (work_h - bh) / 2;
-
-            self.set_physical_position(x, y);
+            self.set_physical_position(point.x, point.y);
         }
     }
 
@@ -795,6 +647,15 @@ impl BubbleWindow {
                 SWP_NOSIZE | SWP_NOACTIVATE,
             );
         }
+    }
+}
+
+fn work_area_from_rect(rect: RECT) -> WorkArea {
+    WorkArea {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
     }
 }
 

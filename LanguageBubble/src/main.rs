@@ -2,6 +2,7 @@
 
 mod animation;
 mod bubble;
+mod bubble_layout;
 mod capslock;
 mod caret;
 mod hook;
