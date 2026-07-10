@@ -36,6 +36,79 @@ pub enum CaretAnchor {
     SelectedItem(i32),
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PlacementPlan {
+    CenterOnScreen,
+    AtCaret(CaretAnchor),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum TransitionPlan {
+    FadeIn { slide_offset: f32 },
+    CarouselSlide { from: f32, to: f32 },
+    ExpandedWindowSlide { horizontal_offset: i32 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct BubbleShowPlan {
+    pub window_size: PixelSize,
+    pub placement: PlacementPlan,
+    pub transition: TransitionPlan,
+    pub capture_label_opacities: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct BubbleShowInput {
+    pub metrics: SizeMetrics,
+    pub display_mode: DisplayMode,
+    pub label_count: usize,
+    pub selected: i32,
+    pub previous_selected: i32,
+    pub caret_available: bool,
+    pub dpi_scale: f32,
+}
+
+pub fn calculate_show_plan(input: BubbleShowInput) -> BubbleShowPlan {
+    let can_slide = input.previous_selected >= 0
+        && input.previous_selected != input.selected
+        && input.label_count > 1
+        && input.caret_available;
+    let placement = if !input.caret_available {
+        PlacementPlan::CenterOnScreen
+    } else if input.display_mode == DisplayMode::Expanded && input.label_count > 1 {
+        PlacementPlan::AtCaret(CaretAnchor::SelectedItem(input.selected))
+    } else {
+        PlacementPlan::AtCaret(CaretAnchor::Center)
+    };
+    let transition = if can_slide && input.display_mode == DisplayMode::Expanded {
+        let delta = input.selected - input.previous_selected;
+        TransitionPlan::ExpandedWindowSlide {
+            horizontal_offset: (delta as f32 * input.metrics.item_width * input.dpi_scale) as i32,
+        }
+    } else if can_slide && input.display_mode == DisplayMode::Carousel {
+        TransitionPlan::CarouselSlide {
+            from: -input.previous_selected as f32 * input.metrics.item_width,
+            to: -input.selected as f32 * input.metrics.item_width,
+        }
+    } else {
+        TransitionPlan::FadeIn {
+            slide_offset: -input.selected as f32 * input.metrics.item_width,
+        }
+    };
+
+    BubbleShowPlan {
+        window_size: calculate_window_size(
+            input.metrics,
+            input.display_mode,
+            input.label_count,
+            input.dpi_scale,
+        ),
+        placement,
+        transition,
+        capture_label_opacities: can_slide,
+    }
+}
+
 pub fn calculate_window_size(
     metrics: SizeMetrics,
     display_mode: DisplayMode,
@@ -326,5 +399,97 @@ mod tests {
             CaretAnchor::Center,
         );
         assert_eq!(point.x, 10);
+    }
+
+    fn show_input(display_mode: DisplayMode) -> BubbleShowInput {
+        BubbleShowInput {
+            metrics: BubbleSize::Medium.metrics(),
+            display_mode,
+            label_count: 3,
+            selected: 1,
+            previous_selected: 0,
+            caret_available: true,
+            dpi_scale: 1.0,
+        }
+    }
+
+    #[test]
+    fn first_show_fades_in_at_the_caret() {
+        let mut input = show_input(DisplayMode::Carousel);
+        input.previous_selected = -1;
+        let plan = calculate_show_plan(input);
+        assert_eq!(
+            plan.transition,
+            TransitionPlan::FadeIn {
+                slide_offset: -30.0,
+            }
+        );
+        assert_eq!(plan.placement, PlacementPlan::AtCaret(CaretAnchor::Center));
+        assert!(!plan.capture_label_opacities);
+    }
+
+    #[test]
+    fn carousel_selection_change_uses_row_slide() {
+        let plan = calculate_show_plan(show_input(DisplayMode::Carousel));
+        assert_eq!(
+            plan.transition,
+            TransitionPlan::CarouselSlide {
+                from: 0.0,
+                to: -30.0,
+            }
+        );
+        assert!(plan.capture_label_opacities);
+    }
+
+    #[test]
+    fn expanded_selection_change_uses_scaled_window_slide() {
+        let mut input = show_input(DisplayMode::Expanded);
+        input.selected = 2;
+        input.dpi_scale = 1.5;
+        let plan = calculate_show_plan(input);
+        assert_eq!(
+            plan.transition,
+            TransitionPlan::ExpandedWindowSlide {
+                horizontal_offset: 90,
+            }
+        );
+        assert_eq!(
+            plan.placement,
+            PlacementPlan::AtCaret(CaretAnchor::SelectedItem(2))
+        );
+        assert!(plan.capture_label_opacities);
+    }
+
+    #[test]
+    fn missing_caret_disables_slide_and_centers_window() {
+        let mut input = show_input(DisplayMode::Carousel);
+        input.caret_available = false;
+        let plan = calculate_show_plan(input);
+        assert_eq!(plan.placement, PlacementPlan::CenterOnScreen);
+        assert!(matches!(plan.transition, TransitionPlan::FadeIn { .. }));
+        assert!(!plan.capture_label_opacities);
+    }
+
+    #[test]
+    fn simple_mode_keeps_fade_transition_after_selection_change() {
+        let plan = calculate_show_plan(show_input(DisplayMode::Simple));
+        assert!(matches!(plan.transition, TransitionPlan::FadeIn { .. }));
+        assert!(plan.capture_label_opacities);
+    }
+
+    #[test]
+    fn single_expanded_label_uses_normal_anchor_and_size() {
+        let mut input = show_input(DisplayMode::Expanded);
+        input.label_count = 1;
+        let plan = calculate_show_plan(input);
+        assert_eq!(plan.placement, PlacementPlan::AtCaret(CaretAnchor::Center));
+        assert_eq!(
+            plan.window_size,
+            PixelSize {
+                width: 43,
+                height: 37,
+            }
+        );
+        assert!(matches!(plan.transition, TransitionPlan::FadeIn { .. }));
     }
 }

@@ -13,8 +13,8 @@ use windows::core::*;
 
 use crate::animation::*;
 use crate::bubble_layout::{
-    CaretAnchor, PixelSize, PlacementContext, WorkArea, calculate_window_size, center_in_work_area,
-    place_at_caret,
+    BubbleShowInput, PixelPoint, PixelSize, PlacementContext, PlacementPlan, TransitionPlan,
+    WorkArea, calculate_show_plan, center_in_work_area, place_at_caret,
 };
 use crate::caret::ScreenPoint;
 use crate::language::LayoutInfo;
@@ -193,23 +193,19 @@ impl BubbleWindow {
         selected: i32,
         caret: Option<ScreenPoint>,
     ) {
-        // Stop timers
-        unsafe {
-            let _ = KillTimer(Some(self.msg_hwnd), TIMER_HIDE);
-            let _ = KillTimer(Some(self.msg_hwnd), TIMER_ANIM);
-        }
-
-        // Update labels
+        self.stop_show_timers();
         self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
+        let plan = calculate_show_plan(BubbleShowInput {
+            metrics: self.size.metrics(),
+            display_mode: self.display_mode,
+            label_count: self.labels.len(),
+            selected,
+            previous_selected: self.previous_selected_index,
+            caret_available: caret.is_some(),
+            dpi_scale: self.get_dpi_scale(),
+        });
 
-        let can_slide = self.previous_selected_index >= 0
-            && self.previous_selected_index != selected
-            && self.labels.len() > 1
-            && caret.is_some();
-
-        // Snapshot current label opacities BEFORE changing selected_index,
-        // so we capture what's actually on screen, not the new targets.
-        if can_slide {
+        if plan.capture_label_opacities {
             let current_opacities: Vec<f32> = (0..self.labels.len())
                 .map(|i| {
                     self.anim
@@ -218,107 +214,78 @@ impl BubbleWindow {
                 .collect();
             self.anim.begin_label_transition(current_opacities);
         }
-
-        // Now update the selection
         self.selected_index = selected;
-        // Compute window size
-        let metrics = self.size.metrics();
-        let dpi_scale = self.get_dpi_scale();
-        let window_size =
-            calculate_window_size(metrics, self.display_mode, self.labels.len(), dpi_scale);
+        self.resize_window(plan.window_size);
+        let target = self.target_position(plan.placement, caret, plan.window_size);
+        self.apply_transition(plan.transition, target);
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        self.render();
+        self.previous_selected_index = selected;
+        self.start_show_timers();
+    }
 
-        // Resize and position
+    fn stop_show_timers(&self) {
+        unsafe {
+            let _ = KillTimer(Some(self.msg_hwnd), TIMER_HIDE);
+            let _ = KillTimer(Some(self.msg_hwnd), TIMER_ANIM);
+        }
+    }
+
+    fn resize_window(&mut self, size: PixelSize) {
         unsafe {
             SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
                 0,
                 0,
-                window_size.width,
-                window_size.height,
+                size.width,
+                size.height,
                 SWP_NOMOVE | SWP_NOACTIVATE,
             )
             .ok();
         }
-
-        // Recreate render target for new size
         self.render_target = None;
+    }
 
-        // Position and animate
-        if can_slide
-            && self.display_mode == DisplayMode::Expanded
-            && let Some(caret_pt) = caret
-        {
-            // EXPANDED SLIDE: compute target without moving the window yet
-            let target = place_at_caret(
-                self.placement_context(caret_pt, window_size),
-                CaretAnchor::SelectedItem(selected),
-            );
-
-            // Start animation from current position to target
-            let delta = selected - self.previous_selected_index;
-            let dpi_scale = self.get_dpi_scale();
-            let offset = (delta as f32 * metrics.item_width * dpi_scale) as i32;
-            let nominal_from = target.x + offset;
-            self.anim.begin_window_slide(nominal_from, target.x);
-
-            // Place window at the animation's actual start position (not the target!)
-            let start_x = self.anim.win_slide_from_x;
-            self.desired_phys_x = target.x;
-            self.desired_phys_y = target.y;
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd,
-                    Some(HWND_TOPMOST),
-                    start_x,
-                    target.y,
-                    0,
-                    0,
-                    SWP_NOSIZE | SWP_NOACTIVATE,
-                );
+    fn apply_transition(&mut self, transition: TransitionPlan, target: PixelPoint) {
+        match transition {
+            TransitionPlan::FadeIn { slide_offset } => {
+                self.set_physical_position(target.x, target.y);
+                self.anim.slide_to = slide_offset;
+                self.anim.slide_from = slide_offset;
+                self.anim.sliding = false;
+                self.anim.begin_fade_in();
             }
-            self.anim.set_visible();
-        } else if can_slide && self.display_mode == DisplayMode::Carousel {
-            // CAROUSEL SLIDE: position window, animate row offset
-            if let Some(caret_pt) = caret {
-                self.position_at_caret(caret_pt, window_size, CaretAnchor::Center);
-            } else {
-                self.center_on_screen(window_size);
+            TransitionPlan::CarouselSlide { from, to } => {
+                self.set_physical_position(target.x, target.y);
+                self.anim.begin_slide(from, to);
+                self.anim.set_visible();
             }
-            let from = -self.previous_selected_index as f32 * metrics.item_width;
-            let to = -selected as f32 * metrics.item_width;
-            self.anim.begin_slide(from, to);
-            self.anim.set_visible();
-        } else {
-            // FIRST SHOW / SIMPLE: position and fade in
-            if let Some(caret_pt) = caret {
-                if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                    self.position_at_caret(
-                        caret_pt,
-                        window_size,
-                        CaretAnchor::SelectedItem(selected),
+            TransitionPlan::ExpandedWindowSlide { horizontal_offset } => {
+                self.anim
+                    .begin_window_slide(target.x + horizontal_offset, target.x);
+                let start_x = self.anim.win_slide_from_x;
+                self.desired_phys_x = target.x;
+                self.desired_phys_y = target.y;
+                unsafe {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        start_x,
+                        target.y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE,
                     );
-                } else {
-                    self.position_at_caret(caret_pt, window_size, CaretAnchor::Center);
                 }
-            } else {
-                self.center_on_screen(window_size);
+                self.anim.set_visible();
             }
-            self.anim.slide_to = -(selected as f32) * metrics.item_width;
-            self.anim.slide_from = self.anim.slide_to;
-            self.anim.sliding = false;
-            self.anim.begin_fade_in();
         }
+    }
 
-        // Show window
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
-
-        self.render();
-        self.previous_selected_index = selected;
-
-        // Start timers
+    fn start_show_timers(&self) {
         unsafe {
             SetTimer(Some(self.msg_hwnd), TIMER_HIDE, 1500, None);
             SetTimer(Some(self.msg_hwnd), TIMER_TOPMOST, 100, None);
@@ -601,17 +568,21 @@ impl BubbleWindow {
         }
     }
 
-    fn position_at_caret(
-        &mut self,
-        phys_pt: ScreenPoint,
+    fn target_position(
+        &self,
+        placement: PlacementPlan,
+        caret: Option<ScreenPoint>,
         window_size: PixelSize,
-        anchor: CaretAnchor,
-    ) {
-        let point = place_at_caret(self.placement_context(phys_pt, window_size), anchor);
-        self.set_physical_position(point.x, point.y);
+    ) -> PixelPoint {
+        match (placement, caret) {
+            (PlacementPlan::AtCaret(anchor), Some(caret)) => {
+                place_at_caret(self.placement_context(caret, window_size), anchor)
+            }
+            _ => self.center_position(window_size),
+        }
     }
 
-    fn center_on_screen(&mut self, window_size: PixelSize) {
+    fn center_position(&self, window_size: PixelSize) -> PixelPoint {
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
             let foreground = GetForegroundWindow();
@@ -627,9 +598,7 @@ impl BubbleWindow {
                 ..Default::default()
             };
             let _ = GetMonitorInfoW(monitor, &mut mi);
-            let point = center_in_work_area(work_area_from_rect(mi.rcWork), window_size);
-
-            self.set_physical_position(point.x, point.y);
+            center_in_work_area(work_area_from_rect(mi.rcWork), window_size)
         }
     }
 
