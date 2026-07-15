@@ -1,19 +1,24 @@
 use std::mem;
 
-use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
 
 use crate::animation::*;
+use crate::bubble_layout::{
+    BubbleShowInput, PixelPoint, PixelSize, PlacementContext, PlacementPlan, TransitionPlan,
+    WorkArea, calculate_show_plan, center_in_work_area, place_at_caret,
+};
 use crate::caret::ScreenPoint;
 use crate::language::LayoutInfo;
+use crate::registry::RegistryKey;
 use crate::types::*;
 
 const CLASS_NAME: PCWSTR = w!("LanguageBubbleOverlay");
@@ -75,14 +80,12 @@ pub struct BubbleWindow {
 
 impl BubbleWindow {
     pub fn new(msg_hwnd: HWND) -> windows::core::Result<Self> {
-        let d2d_factory: ID2D1Factory = unsafe {
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?
-        };
-        let dwrite_factory: IDWriteFactory = unsafe {
-            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?
-        };
+        let d2d_factory: ID2D1Factory =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        let dwrite_factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
 
-        let hwnd = create_overlay_window();
+        let hwnd = create_overlay_window()?;
 
         let mut bw = Self {
             hwnd,
@@ -191,127 +194,102 @@ impl BubbleWindow {
         selected: i32,
         caret: Option<ScreenPoint>,
     ) {
-        // Stop timers
+        self.stop_show_timers();
+        self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
+        let monitor = self.destination_monitor(caret);
+        let dpi_scale = self.monitor_dpi_scale(monitor);
+        let plan = calculate_show_plan(BubbleShowInput {
+            metrics: self.size.metrics(),
+            display_mode: self.display_mode,
+            label_count: self.labels.len(),
+            selected,
+            previous_selected: self.previous_selected_index,
+            caret_available: caret.is_some(),
+            dpi_scale,
+        });
+
+        if plan.capture_label_opacities {
+            let current_opacities: Vec<f32> = (0..self.labels.len())
+                .map(|i| {
+                    self.anim
+                        .label_opacity(i, self.get_label_target_opacity(i as i32))
+                })
+                .collect();
+            self.anim.begin_label_transition(current_opacities);
+        }
+        self.selected_index = selected;
+        self.resize_window(plan.window_size);
+        let target =
+            self.target_position(plan.placement, caret, plan.window_size, monitor, dpi_scale);
+        self.apply_transition(plan.transition, target);
+        unsafe {
+            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
+        }
+        self.render();
+        self.previous_selected_index = selected;
+        self.start_show_timers();
+    }
+
+    fn stop_show_timers(&self) {
         unsafe {
             let _ = KillTimer(Some(self.msg_hwnd), TIMER_HIDE);
             let _ = KillTimer(Some(self.msg_hwnd), TIMER_ANIM);
         }
+    }
 
-        // Update labels
-        self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
-
-        let can_slide = self.previous_selected_index >= 0
-            && self.previous_selected_index != selected
-            && self.labels.len() > 1
-            && caret.is_some();
-
-        // Snapshot current label opacities BEFORE changing selected_index,
-        // so we capture what's actually on screen, not the new targets.
-        if can_slide {
-            let current_opacities: Vec<f32> = (0..self.labels.len())
-                .map(|i| self.anim.label_opacity(i, self.get_label_target_opacity(i as i32)))
-                .collect();
-            self.anim.begin_label_transition(current_opacities);
-        }
-
-        // Now update the selection
-        self.selected_index = selected;
-        // Compute window size
-        let metrics = self.size.metrics();
-        let count = self.labels.len() as f32;
-        let (content_w, content_h) = match self.display_mode {
-            DisplayMode::Expanded if self.labels.len() > 1 => {
-                (count * metrics.item_width, metrics.item_height)
-            }
-            _ => (metrics.item_width, metrics.item_height),
-        };
-        // Scale DIP dimensions to physical pixels for SetWindowPos under PMv2
-        let dpi_scale = self.get_dpi_scale();
-        let win_w = ((content_w + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
-        let win_h = ((content_h + metrics.padding * 2.0 + 1.0) * dpi_scale) as i32;
-
-        // Resize and position
+    fn resize_window(&mut self, size: PixelSize) {
         unsafe {
             SetWindowPos(
                 self.hwnd,
                 Some(HWND_TOPMOST),
                 0,
                 0,
-                win_w,
-                win_h,
+                size.width,
+                size.height,
                 SWP_NOMOVE | SWP_NOACTIVATE,
             )
             .ok();
         }
-
-        // Recreate render target for new size
         self.render_target = None;
+    }
 
-        // Position and animate
-        if can_slide
-            && self.display_mode == DisplayMode::Expanded
-            && let Some(caret_pt) = caret
-        {
-            // EXPANDED SLIDE: compute target without moving the window yet
-            let target_x = self.compute_expanded_x(caret_pt, selected, win_w);
-            let target_y = self.compute_caret_y(caret_pt, win_w, win_h);
-
-            // Start animation from current position to target
-            let delta = selected - self.previous_selected_index;
-            let dpi_scale = self.get_dpi_scale();
-            let offset = (delta as f32 * metrics.item_width * dpi_scale) as i32;
-            let nominal_from = target_x + offset;
-            self.anim.begin_window_slide(nominal_from, target_x);
-
-            // Place window at the animation's actual start position (not the target!)
-            let start_x = self.anim.win_slide_from_x;
-            self.desired_phys_x = target_x;
-            self.desired_phys_y = target_y;
-            unsafe {
-                let _ = SetWindowPos(
-                    self.hwnd, Some(HWND_TOPMOST),
-                    start_x, target_y, 0, 0,
-                    SWP_NOSIZE | SWP_NOACTIVATE,
-                );
+    fn apply_transition(&mut self, transition: TransitionPlan, target: PixelPoint) {
+        match transition {
+            TransitionPlan::FadeIn { slide_offset } => {
+                self.set_physical_position(target.x, target.y);
+                self.anim.slide_to = slide_offset;
+                self.anim.slide_from = slide_offset;
+                self.anim.sliding = false;
+                self.anim.begin_fade_in();
             }
-            self.anim.set_visible();
-        } else if can_slide && self.display_mode == DisplayMode::Carousel {
-            // CAROUSEL SLIDE: position window, animate row offset
-            if let Some(caret_pt) = caret {
-                self.position_at_caret(caret_pt);
-            } else {
-                self.center_on_screen();
+            TransitionPlan::CarouselSlide { from, to } => {
+                self.set_physical_position(target.x, target.y);
+                self.anim.begin_slide(from, to);
+                self.anim.set_visible();
             }
-            let from = -self.previous_selected_index as f32 * metrics.item_width;
-            let to = -selected as f32 * metrics.item_width;
-            self.anim.begin_slide(from, to);
-            self.anim.set_visible();
-        } else {
-            // FIRST SHOW / SIMPLE: position and fade in
-            if let Some(caret_pt) = caret {
-                if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                    self.position_at_caret_expanded(caret_pt, selected);
-                } else {
-                    self.position_at_caret(caret_pt);
+            TransitionPlan::ExpandedWindowSlide { horizontal_offset } => {
+                self.anim
+                    .begin_window_slide(target.x + horizontal_offset, target.x);
+                let start_x = self.anim.win_slide_from_x;
+                self.desired_phys_x = target.x;
+                self.desired_phys_y = target.y;
+                unsafe {
+                    let _ = SetWindowPos(
+                        self.hwnd,
+                        Some(HWND_TOPMOST),
+                        start_x,
+                        target.y,
+                        0,
+                        0,
+                        SWP_NOSIZE | SWP_NOACTIVATE,
+                    );
                 }
-            } else {
-                self.center_on_screen();
+                self.anim.set_visible();
             }
-            self.anim.slide_to = -(selected as f32) * metrics.item_width;
-            self.anim.slide_from = self.anim.slide_to;
-            self.anim.sliding = false;
-            self.anim.begin_fade_in();
         }
+    }
 
-        // Show window
-        unsafe {
-            let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
-        }
-
-        self.render();
-        self.previous_selected_index = selected;
-
-        // Start timers
+    fn start_show_timers(&self) {
         unsafe {
             SetTimer(Some(self.msg_hwnd), TIMER_HIDE, 1500, None);
             SetTimer(Some(self.msg_hwnd), TIMER_TOPMOST, 100, None);
@@ -352,8 +330,12 @@ impl BubbleWindow {
             // Move window without overwriting the target in desired_phys_x
             unsafe {
                 let _ = SetWindowPos(
-                    self.hwnd, Some(HWND_TOPMOST),
-                    x, self.desired_phys_y, 0, 0,
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    x,
+                    self.desired_phys_y,
+                    0,
+                    0,
                     SWP_NOSIZE | SWP_NOACTIVATE,
                 );
             }
@@ -386,13 +368,23 @@ impl BubbleWindow {
 
     fn render(&mut self) {
         self.ensure_render_target();
-        let Some(rt) = &self.render_target else {
-            return;
-        };
-        let Some(fmt) = &self.text_format else {
-            return;
+        let result = match (&self.render_target, &self.text_format) {
+            (Some(render_target), Some(text_format)) => self.draw_frame(render_target, text_format),
+            _ => return,
         };
 
+        // EndDraw reports device loss through D2DERR_RECREATE_TARGET. Dropping
+        // all target-dependent resources lets the next animation tick recover.
+        if result.is_err() {
+            self.render_target = None;
+        }
+    }
+
+    fn draw_frame(
+        &self,
+        rt: &ID2D1HwndRenderTarget,
+        fmt: &IDWriteTextFormat,
+    ) -> windows::core::Result<()> {
         let metrics = self.size.metrics();
         let opacity = self.anim.opacity();
         let (bg_color, border_color, fg_base) = match self.theme_mode {
@@ -421,92 +413,118 @@ impl BubbleWindow {
             }
             _ => {
                 if self.dark_mode {
-                    (DARK_BG, DARK_BORDER, D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+                    (
+                        DARK_BG,
+                        DARK_BORDER,
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    )
                 } else {
-                    (LIGHT_BG, LIGHT_BORDER, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                    (
+                        LIGHT_BG,
+                        LIGHT_BORDER,
+                        D2D1_COLOR_F {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    )
                 }
             }
         };
 
         unsafe {
             rt.BeginDraw();
-            rt.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
+            let draw_result = (|| -> windows::core::Result<()> {
+                rt.Clear(Some(&D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                }));
 
-            let size = rt.GetSize();
+                let size = rt.GetSize();
 
-            // Background rounded rect
-            let bg_brush = rt
-                .CreateSolidColorBrush(
+                // Background rounded rect
+                let bg_brush = rt.CreateSolidColorBrush(
                     &D2D1_COLOR_F {
                         a: bg_color.a * opacity,
                         ..bg_color
                     },
                     None,
-                )
-                .unwrap();
-            let rrect = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: 0.5,
-                    top: 0.5,
-                    right: size.width - 0.5,
-                    bottom: size.height - 0.5,
-                },
-                radiusX: metrics.corner_radius,
-                radiusY: metrics.corner_radius,
-            };
-            rt.FillRoundedRectangle(&rrect, &bg_brush);
+                )?;
+                let rrect = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: 0.5,
+                        top: 0.5,
+                        right: size.width - 0.5,
+                        bottom: size.height - 0.5,
+                    },
+                    radiusX: metrics.corner_radius,
+                    radiusY: metrics.corner_radius,
+                };
+                rt.FillRoundedRectangle(&rrect, &bg_brush);
 
-            // Border
-            let border_brush = rt
-                .CreateSolidColorBrush(
+                // Border
+                let border_brush = rt.CreateSolidColorBrush(
                     &D2D1_COLOR_F {
                         a: border_color.a * opacity,
                         ..border_color
                     },
                     None,
-                )
-                .unwrap();
-            rt.DrawRoundedRectangle(&rrect, &border_brush, 0.5, None);
+                )?;
+                rt.DrawRoundedRectangle(&rrect, &border_brush, 0.5, None);
 
-            // Draw labels
-            let slide_offset = if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1
-            {
-                self.anim.slide_offset()
-            } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                0.0 // All labels visible, no row offset
-            } else {
-                -(self.selected_index as f32 * metrics.item_width)
-            };
+                // Draw labels
+                let slide_offset =
+                    if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1 {
+                        self.anim.slide_offset()
+                    } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
+                        0.0 // All labels visible, no row offset
+                    } else {
+                        -(self.selected_index as f32 * metrics.item_width)
+                    };
 
-            for (i, label_text) in self.labels.iter().enumerate() {
-                let label_opacity = self.get_label_opacity(i as i32);
-                let fg_color = D2D1_COLOR_F {
-                    a: label_opacity * opacity,
-                    ..fg_base
-                };
-                let fg_brush = rt.CreateSolidColorBrush(&fg_color, None).unwrap();
+                for (i, label_text) in self.labels.iter().enumerate() {
+                    let label_opacity = self.get_label_opacity(i as i32);
+                    let fg_color = D2D1_COLOR_F {
+                        a: label_opacity * opacity,
+                        ..fg_base
+                    };
+                    let fg_brush = rt.CreateSolidColorBrush(&fg_color, None)?;
 
-                let x = metrics.padding + i as f32 * metrics.item_width + slide_offset;
-                let y = metrics.padding;
+                    let x = metrics.padding + i as f32 * metrics.item_width + slide_offset;
+                    let y = metrics.padding;
 
-                let rect = D2D_RECT_F {
-                    left: x,
-                    top: y,
-                    right: x + metrics.item_width,
-                    bottom: y + metrics.item_height,
-                };
+                    let rect = D2D_RECT_F {
+                        left: x,
+                        top: y,
+                        right: x + metrics.item_width,
+                        bottom: y + metrics.item_height,
+                    };
 
-                let wide: Vec<u16> = label_text.encode_utf16().collect();
-                rt.DrawText(&wide, fmt, &rect, &fg_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
-            }
+                    let wide: Vec<u16> = label_text.encode_utf16().collect();
+                    rt.DrawText(
+                        &wide,
+                        fmt,
+                        &rect,
+                        &fg_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
 
-            let _ = rt.EndDraw(None, None);
+                Ok(())
+            })();
+            let end_result = rt.EndDraw(None, None);
+            draw_result.and(end_result)?;
         }
+        Ok(())
     }
 
     /// Get the *target* opacity for a label (what it should settle at).
@@ -515,9 +533,17 @@ impl BubbleWindow {
             return 1.0;
         }
         if self.display_mode == DisplayMode::Simple {
-            return if index == self.selected_index { 1.0 } else { 0.0 };
+            return if index == self.selected_index {
+                1.0
+            } else {
+                0.0
+            };
         }
-        if index == self.selected_index { 1.0 } else { 0.3 }
+        if index == self.selected_index {
+            1.0
+        } else {
+            0.3
+        }
     }
 
     /// Get the current animated opacity for a label.
@@ -534,212 +560,92 @@ impl BubbleWindow {
         }
     }
 
-    fn position_at_caret(&mut self, phys_pt: ScreenPoint) {
+    fn destination_monitor(&self, caret: Option<ScreenPoint>) -> HMONITOR {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let mut x = phys_pt.x - bw / 2;
-            let mut y = phys_pt.y + caret_offset;
-
-            // Clamp to monitor work area
-            let pt = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
-            }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
+            if let Some(caret) = caret {
+                return MonitorFromPoint(
+                    POINT {
+                        x: caret.x,
+                        y: caret.y,
+                    },
+                    MONITOR_DEFAULTTONEAREST,
+                );
             }
 
-            self.set_physical_position(x, y);
-        }
-    }
-
-    fn position_at_caret_expanded(&mut self, phys_pt: ScreenPoint, selected: i32) {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let metrics = self.size.metrics();
-            let selected_center_dip =
-                metrics.padding + selected as f32 * metrics.item_width + metrics.item_width / 2.0;
-            let selected_center_phys = (selected_center_dip * dpi_scale) as i32;
-
-            let mut x = phys_pt.x - selected_center_phys;
-            let mut y = phys_pt.y + caret_offset;
-
-            // Clamp to monitor
-            let pt = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
-            }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
-            }
-
-            self.set_physical_position(x, y);
-        }
-    }
-
-    /// Compute the target X position for expanded mode without moving the window.
-    fn compute_expanded_x(&self, phys_pt: ScreenPoint, selected: i32, _win_w: i32) -> i32 {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-
-            let metrics = self.size.metrics();
-            let selected_center_dip =
-                metrics.padding + selected as f32 * metrics.item_width + metrics.item_width / 2.0;
-            let selected_center_phys = (selected_center_dip * dpi_scale) as i32;
-
-            let mut x = phys_pt.x - selected_center_phys;
-
-            // Clamp to monitor
-            let pt = POINT { x: phys_pt.x, y: phys_pt.y };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if x + bw > mi.rcWork.right - margin {
-                x = mi.rcWork.right - bw - margin;
-            }
-            if x < mi.rcWork.left + margin {
-                x = mi.rcWork.left + margin;
-            }
-            x
-        }
-    }
-
-    /// Compute the target Y position for caret-relative placement.
-    fn compute_caret_y(&self, phys_pt: ScreenPoint, _win_w: i32, _win_h: i32) -> i32 {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
-
-            let dpi_scale = self.get_dpi_scale();
-            let margin = (10.0 * dpi_scale) as i32;
-            let caret_offset = (4.0 * dpi_scale) as i32;
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bh = rect.bottom - rect.top;
-
-            let mut y = phys_pt.y + caret_offset;
-
-            let pt = POINT { x: phys_pt.x, y: phys_pt.y };
-            let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
-            let mut mi = MONITORINFO {
-                cbSize: mem::size_of::<MONITORINFO>() as u32,
-                ..Default::default()
-            };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
-
-            if y + bh > mi.rcWork.bottom - margin {
-                y = phys_pt.caret_top - bh - caret_offset; // flip above caret top
-            }
-            if y < mi.rcWork.top + margin {
-                y = mi.rcWork.top + margin;
-            }
-            y
-        }
-    }
-
-    fn center_on_screen(&mut self) {
-        unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
-
-            let mut rect = RECT::default();
-            GetWindowRect(self.hwnd, &mut rect).ok();
-            let bw = rect.right - rect.left;
-            let bh = rect.bottom - rect.top;
-
-            let fg = GetForegroundWindow();
-            let hmon = if !fg.is_invalid() {
-                MonitorFromWindow(fg, MONITOR_DEFAULTTONEAREST)
+            let foreground = GetForegroundWindow();
+            if !foreground.is_invalid() {
+                MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
             } else {
                 let mut cursor = POINT::default();
                 let _ = GetCursorPos(&mut cursor);
                 MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
-            };
+            }
+        }
+    }
 
+    fn monitor_dpi_scale(&self, monitor: HMONITOR) -> f32 {
+        unsafe {
+            let mut dpi_x = 0;
+            let mut dpi_y = 0;
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
+                && dpi_x > 0
+            {
+                dpi_x as f32 / 96.0
+            } else {
+                self.get_dpi_scale()
+            }
+        }
+    }
+
+    fn placement_context(
+        &self,
+        phys_pt: ScreenPoint,
+        window_size: PixelSize,
+        monitor: HMONITOR,
+        dpi_scale: f32,
+    ) -> PlacementContext {
+        unsafe {
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
             };
-            let _ = GetMonitorInfoW(hmon, &mut mi);
+            let _ = GetMonitorInfoW(monitor, &mut mi);
+            PlacementContext {
+                caret: phys_pt,
+                work_area: work_area_from_rect(mi.rcWork),
+                window_size,
+                dpi_scale,
+                metrics: self.size.metrics(),
+            }
+        }
+    }
 
-            let work_w = mi.rcWork.right - mi.rcWork.left;
-            let work_h = mi.rcWork.bottom - mi.rcWork.top;
-            let x = mi.rcWork.left + (work_w - bw) / 2;
-            let y = mi.rcWork.top + (work_h - bh) / 2;
+    fn target_position(
+        &self,
+        placement: PlacementPlan,
+        caret: Option<ScreenPoint>,
+        window_size: PixelSize,
+        monitor: HMONITOR,
+        dpi_scale: f32,
+    ) -> PixelPoint {
+        match (placement, caret) {
+            (PlacementPlan::AtCaret(anchor), Some(caret)) => place_at_caret(
+                self.placement_context(caret, window_size, monitor, dpi_scale),
+                anchor,
+            ),
+            _ => self.center_position(window_size, monitor),
+        }
+    }
 
-            self.set_physical_position(x, y);
+    fn center_position(&self, window_size: PixelSize, monitor: HMONITOR) -> PixelPoint {
+        unsafe {
+            let mut mi = MONITORINFO {
+                cbSize: mem::size_of::<MONITORINFO>() as u32,
+                ..Default::default()
+            };
+            let _ = GetMonitorInfoW(monitor, &mut mi);
+            center_in_work_area(work_area_from_rect(mi.rcWork), window_size)
         }
     }
 
@@ -760,10 +666,28 @@ impl BubbleWindow {
     }
 }
 
-fn create_overlay_window() -> HWND {
+impl Drop for BubbleWindow {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hwnd.is_invalid() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
+
+fn work_area_from_rect(rect: RECT) -> WorkArea {
+    WorkArea {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+    }
+}
+
+fn create_overlay_window() -> windows::core::Result<HWND> {
     unsafe {
-        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .unwrap_or_default();
+        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -788,8 +712,7 @@ fn create_overlay_window() -> HWND {
             None,
             Some(hinstance.into()),
             None,
-        )
-        .unwrap();
+        )?;
 
         // DWM composition for hardware transparency
         let margins = MARGINS {
@@ -803,7 +726,7 @@ fn create_overlay_window() -> HWND {
         // Make layered window fully opaque (DWM handles the transparency)
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
 
-        hwnd
+        Ok(hwnd)
     }
 }
 
@@ -826,29 +749,15 @@ fn resolve_dark_mode(theme_mode: ThemeMode) -> bool {
 }
 
 fn is_dark_mode() -> bool {
-    use windows::Win32::System::Registry::*;
-    unsafe {
-        let mut hkey = HKEY::default();
-        let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
-        if RegOpenKeyExW(HKEY_CURRENT_USER, subkey, Some(0), KEY_READ, &mut hkey).is_err() {
-            return true;
-        }
-        let mut val: u32 = 1;
-        let mut size = mem::size_of::<u32>() as u32;
-        let mut kind = windows::Win32::System::Registry::REG_VALUE_TYPE::default();
-        let result = RegQueryValueExW(
-            hkey,
-            w!("AppsUseLightTheme"),
-            None,
-            Some(&mut kind),
-            Some(&mut val as *mut u32 as *mut u8),
-            Some(&mut size),
-        );
-        let _ = RegCloseKey(hkey);
-        if result.is_ok() {
-            val == 0
-        } else {
-            true
-        }
-    }
+    use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ};
+
+    let subkey = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Themes\\Personalize");
+    let Ok(Some(key)) = RegistryKey::open_optional(HKEY_CURRENT_USER, subkey, KEY_READ) else {
+        return true;
+    };
+    key.query_u32(w!("AppsUseLightTheme"))
+        .ok()
+        .flatten()
+        .map(|value| value == 0)
+        .unwrap_or(true)
 }

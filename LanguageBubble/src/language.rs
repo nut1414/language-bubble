@@ -6,7 +6,8 @@ use windows::Win32::UI::Input::KeyboardAndMouse::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
 
 const WM_INPUTLANGCHANGEREQUEST: u32 = 0x0050;
-const KLF_SETFORPROCESS: ACTIVATE_KEYBOARD_LAYOUT_FLAGS = ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0x00000100);
+const KLF_SETFORPROCESS: ACTIVATE_KEYBOARD_LAYOUT_FLAGS =
+    ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0x00000100);
 
 #[derive(Debug, Clone)]
 pub struct LayoutInfo {
@@ -41,7 +42,12 @@ impl LanguageService {
                 return;
             }
             let mut hkls = vec![HKL::default(); count];
-            GetKeyboardLayoutList(Some(&mut hkls));
+            let copied = GetKeyboardLayoutList(Some(&mut hkls));
+            if copied <= 0 {
+                self.layouts.clear();
+                return;
+            }
+            hkls.truncate(copied as usize);
             self.layouts = hkls.into_iter().map(make_layout_info).collect();
         }
     }
@@ -209,53 +215,74 @@ fn get_locale_info(locale: u32, lctype: u32, buf: &mut [u16]) -> i32 {
 fn get_bubble_text(two_letter: &str) -> String {
     match two_letter {
         "en" => "A",
-        "ja" => "\u{3042}",    // あ
-        "zh" => "\u{4e2d}",    // 中
-        "ko" => "\u{ac00}",    // 가
-        "th" => "\u{0e01}",    // ก
-        "km" => "\u{1780}",    // ក
-        "lo" => "\u{0ea5}",    // ລ
-        "my" => "\u{1000}",    // က
-        "hi" => "\u{0905}",    // अ
-        "mr" => "\u{092e}",    // म
-        "ne" => "\u{0928}",    // न
-        "sa" => "\u{0938}",    // स
+        "ja" => "\u{3042}",        // あ
+        "zh" => "\u{4e2d}",        // 中
+        "ko" => "\u{ac00}",        // 가
+        "th" => "\u{0e01}",        // ก
+        "km" => "\u{1780}",        // ក
+        "lo" => "\u{0ea5}",        // ລ
+        "my" => "\u{1000}",        // က
+        "hi" => "\u{0905}",        // अ
+        "mr" => "\u{092e}",        // म
+        "ne" => "\u{0928}",        // न
+        "sa" => "\u{0938}",        // स
         "bn" | "as" => "\u{0985}", // অ
-        "gu" => "\u{0a97}",   // ગ
-        "pa" => "\u{0a2a}",   // ਪ
-        "ta" => "\u{0ba4}",   // த
-        "te" => "\u{0c24}",   // త
-        "kn" => "\u{0c95}",   // ಕ
-        "ml" => "\u{0d2e}",   // മ
-        "si" => "\u{0dc3}",   // ස
-        "or" => "\u{0b13}",   // ଓ
-        "ur" => "\u{0627}",   // ا
-        "ar" => "\u{0639}",   // ع
-        "fa" => "\u{0641}",   // ف
-        "ps" => "\u{067e}",   // پ
-        "ug" => "\u{0626}",   // ئ
-        "sd" => "\u{0633}",   // س
-        "ku" => "\u{06a9}",   // ک
-        "he" => "\u{05d0}",   // א
-        "yi" => "\u{05d9}",   // י
-        "ru" => "\u{0410}",   // А
-        "uk" => "\u{0423}",   // У
-        "bg" => "\u{0411}",   // Б
-        "sr" => "\u{0421}",   // С
-        "mk" => "\u{041c}",   // М
-        "kk" => "\u{049a}",   // Қ
-        "ky" => "\u{041a}",   // К
-        "mn" => "\u{041c}",   // М
-        "tg" => "\u{0422}",   // Т
-        "el" => "\u{0391}",   // Α
-        "ka" => "\u{10d0}",   // ა
-        "hy" => "\u{0531}",   // Ա
-        "bo" => "\u{0f56}",   // བ
-        "am" => "\u{12a0}",   // አ
-        "ti" => "\u{1275}",   // ት
-        "iu" => "\u{1403}",   // ᐃ
-        "cr" => "\u{1431}",   // ᐱ
+        "gu" => "\u{0a97}",        // ગ
+        "pa" => "\u{0a2a}",        // ਪ
+        "ta" => "\u{0ba4}",        // த
+        "te" => "\u{0c24}",        // త
+        "kn" => "\u{0c95}",        // ಕ
+        "ml" => "\u{0d2e}",        // മ
+        "si" => "\u{0dc3}",        // ස
+        "or" => "\u{0b13}",        // ଓ
+        "ur" => "\u{0627}",        // ا
+        "ar" => "\u{0639}",        // ع
+        "fa" => "\u{0641}",        // ف
+        "ps" => "\u{067e}",        // پ
+        "ug" => "\u{0626}",        // ئ
+        "sd" => "\u{0633}",        // س
+        "ku" => "\u{06a9}",        // ک
+        "he" => "\u{05d0}",        // א
+        "yi" => "\u{05d9}",        // י
+        "ru" => "\u{0410}",        // А
+        "uk" => "\u{0423}",        // У
+        "bg" => "\u{0411}",        // Б
+        "sr" => "\u{0421}",        // С
+        "mk" => "\u{041c}",        // М
+        "kk" => "\u{049a}",        // Қ
+        "ky" => "\u{041a}",        // К
+        "mn" => "\u{041c}",        // М
+        "tg" => "\u{0422}",        // Т
+        "el" => "\u{0391}",        // Α
+        "ka" => "\u{10d0}",        // ა
+        "hy" => "\u{0531}",        // Ա
+        "bo" => "\u{0f56}",        // བ
+        "am" => "\u{12a0}",        // አ
+        "ti" => "\u{1275}",        // ት
+        "iu" => "\u{1403}",        // ᐃ
+        "cr" => "\u{1431}",        // ᐱ
         other => return other.to_uppercase(),
     }
     .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn known_languages_use_existing_bubble_glyphs() {
+        assert_eq!(get_bubble_text("en"), "A");
+        assert_eq!(get_bubble_text("ja"), "\u{3042}");
+        assert_eq!(get_bubble_text("zh"), "\u{4e2d}");
+        assert_eq!(get_bubble_text("th"), "\u{0e01}");
+        assert_eq!(get_bubble_text("ar"), "\u{0639}");
+        assert_eq!(get_bubble_text("ru"), "\u{0410}");
+    }
+
+    #[test]
+    fn unknown_languages_fall_back_to_uppercase_code() {
+        assert_eq!(get_bubble_text("fr"), "FR");
+        assert_eq!(get_bubble_text("??"), "??");
+    }
 }
