@@ -196,6 +196,8 @@ impl BubbleWindow {
     ) {
         self.stop_show_timers();
         self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
+        let monitor = self.destination_monitor(caret);
+        let dpi_scale = self.monitor_dpi_scale(monitor);
         let plan = calculate_show_plan(BubbleShowInput {
             metrics: self.size.metrics(),
             display_mode: self.display_mode,
@@ -203,7 +205,7 @@ impl BubbleWindow {
             selected,
             previous_selected: self.previous_selected_index,
             caret_available: caret.is_some(),
-            dpi_scale: self.get_dpi_scale(),
+            dpi_scale,
         });
 
         if plan.capture_label_opacities {
@@ -217,7 +219,8 @@ impl BubbleWindow {
         }
         self.selected_index = selected;
         self.resize_window(plan.window_size);
-        let target = self.target_position(plan.placement, caret, plan.window_size);
+        let target =
+            self.target_position(plan.placement, caret, plan.window_size, monitor, dpi_scale);
         self.apply_transition(plan.transition, target);
         unsafe {
             let _ = ShowWindow(self.hwnd, SW_SHOWNOACTIVATE);
@@ -557,14 +560,52 @@ impl BubbleWindow {
         }
     }
 
-    fn placement_context(&self, phys_pt: ScreenPoint, window_size: PixelSize) -> PlacementContext {
+    fn destination_monitor(&self, caret: Option<ScreenPoint>) -> HMONITOR {
         unsafe {
             SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-            let point = POINT {
-                x: phys_pt.x,
-                y: phys_pt.y,
-            };
-            let monitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+            if let Some(caret) = caret {
+                return MonitorFromPoint(
+                    POINT {
+                        x: caret.x,
+                        y: caret.y,
+                    },
+                    MONITOR_DEFAULTTONEAREST,
+                );
+            }
+
+            let foreground = GetForegroundWindow();
+            if !foreground.is_invalid() {
+                MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
+            } else {
+                let mut cursor = POINT::default();
+                let _ = GetCursorPos(&mut cursor);
+                MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
+            }
+        }
+    }
+
+    fn monitor_dpi_scale(&self, monitor: HMONITOR) -> f32 {
+        unsafe {
+            let mut dpi_x = 0;
+            let mut dpi_y = 0;
+            if GetDpiForMonitor(monitor, MDT_EFFECTIVE_DPI, &mut dpi_x, &mut dpi_y).is_ok()
+                && dpi_x > 0
+            {
+                dpi_x as f32 / 96.0
+            } else {
+                self.get_dpi_scale()
+            }
+        }
+    }
+
+    fn placement_context(
+        &self,
+        phys_pt: ScreenPoint,
+        window_size: PixelSize,
+        monitor: HMONITOR,
+        dpi_scale: f32,
+    ) -> PlacementContext {
+        unsafe {
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()
@@ -574,7 +615,7 @@ impl BubbleWindow {
                 caret: phys_pt,
                 work_area: work_area_from_rect(mi.rcWork),
                 window_size,
-                dpi_scale: self.get_dpi_scale(),
+                dpi_scale,
                 metrics: self.size.metrics(),
             }
         }
@@ -585,26 +626,20 @@ impl BubbleWindow {
         placement: PlacementPlan,
         caret: Option<ScreenPoint>,
         window_size: PixelSize,
+        monitor: HMONITOR,
+        dpi_scale: f32,
     ) -> PixelPoint {
         match (placement, caret) {
-            (PlacementPlan::AtCaret(anchor), Some(caret)) => {
-                place_at_caret(self.placement_context(caret, window_size), anchor)
-            }
-            _ => self.center_position(window_size),
+            (PlacementPlan::AtCaret(anchor), Some(caret)) => place_at_caret(
+                self.placement_context(caret, window_size, monitor, dpi_scale),
+                anchor,
+            ),
+            _ => self.center_position(window_size, monitor),
         }
     }
 
-    fn center_position(&self, window_size: PixelSize) -> PixelPoint {
+    fn center_position(&self, window_size: PixelSize, monitor: HMONITOR) -> PixelPoint {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
-            let foreground = GetForegroundWindow();
-            let monitor = if !foreground.is_invalid() {
-                MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
-            } else {
-                let mut cursor = POINT::default();
-                let _ = GetCursorPos(&mut cursor);
-                MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST)
-            };
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
                 ..Default::default()

@@ -331,18 +331,23 @@ fn set_start_with_windows_msix(enable: bool) -> Result<()> {
 }
 
 fn is_start_with_windows_registry() -> Result<bool> {
-    let key = RegistryKey::open(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_READ)?;
+    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_READ)? else {
+        return Ok(false);
+    };
     key.value_exists(APP_NAME)
 }
 
 fn set_start_with_windows_registry(enable: bool) -> Result<()> {
-    let key = RegistryKey::open(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_WRITE)?;
     if enable {
+        let key = RegistryKey::create(HKEY_CURRENT_USER, RUN_SUBKEY)?;
         let executable = std::env::current_exe()
             .map_err(|error| Error::new(GENERIC_FAILURE, error.to_string()))?;
         key.set_string(APP_NAME, &format!("\"{}\"", executable.display()))
-    } else {
+    } else if let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_WRITE)?
+    {
         key.delete_value(APP_NAME)
+    } else {
+        Ok(())
     }
 }
 

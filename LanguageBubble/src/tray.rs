@@ -449,7 +449,7 @@ pub fn show_context_menu(hwnd: HWND, snapshot: &TrayMenuSnapshot) -> Option<Tray
         // Key Bindings submenu (now includes display mode per key)
         let key_menu = CreatePopupMenu().ok()?;
         for combo in HookKeyCombo::ALL {
-            add_key_submenu(key_menu, combo, bindings.get(combo));
+            let _ = add_key_submenu(key_menu, combo, bindings.get(combo));
         }
         let _ = AppendMenuW(menu, MF_POPUP, key_menu.0 as usize, w!("Key Bindings"));
 
@@ -564,9 +564,13 @@ pub fn show_context_menu(hwnd: HWND, snapshot: &TrayMenuSnapshot) -> Option<Tray
     }
 }
 
-unsafe fn add_key_submenu(parent: HMENU, combo: HookKeyCombo, binding: KeyBindingConfig) {
+unsafe fn add_key_submenu(
+    parent: HMENU,
+    combo: HookKeyCombo,
+    binding: KeyBindingConfig,
+) -> Option<()> {
     unsafe {
-        let sub = CreatePopupMenu().unwrap();
+        let sub = CreatePopupMenu().ok()?;
         let label = match combo {
             HookKeyCombo::CapsLock => "CapsLock",
             HookKeyCombo::WinSpace => "Win + Space",
@@ -624,6 +628,7 @@ unsafe fn add_key_submenu(parent: HMENU, combo: HookKeyCombo, binding: KeyBindin
 
         let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = AppendMenuW(parent, MF_POPUP, sub.0 as usize, PCWSTR(wide.as_ptr()));
+        Some(())
     }
 }
 
