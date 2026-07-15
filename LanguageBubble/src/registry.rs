@@ -72,9 +72,9 @@ impl RegistryKey {
                 Some((&mut value as *mut u32).cast()),
                 Some(&mut size),
             );
-            if result.is_ok() {
+            if result.is_ok() && is_u32_value(kind, size) {
                 Ok(Some(value))
-            } else if is_file_not_found(result) {
+            } else if result.is_ok() || is_file_not_found(result) {
                 Ok(None)
             } else {
                 Err(result.into())
@@ -139,4 +139,21 @@ fn is_file_not_found(error: WIN32_ERROR) -> bool {
 
 fn is_file_not_found_error(error: &windows::core::Error) -> bool {
     WIN32_ERROR::from_error(error).is_some_and(is_file_not_found)
+}
+
+fn is_u32_value(kind: REG_VALUE_TYPE, size: u32) -> bool {
+    kind == REG_DWORD && size == size_of::<u32>() as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn u32_queries_require_a_full_dword() {
+        assert!(is_u32_value(REG_DWORD, size_of::<u32>() as u32));
+        assert!(!is_u32_value(REG_SZ, size_of::<u32>() as u32));
+        assert!(!is_u32_value(REG_DWORD, 2));
+        assert!(!is_u32_value(REG_DWORD, 8));
+    }
 }

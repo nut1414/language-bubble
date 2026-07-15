@@ -115,6 +115,7 @@ impl AppState {
 thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
     static DEFERRED_SWITCH: Cell<Option<HookKeyCombo>> = const { Cell::new(None) };
+    static DEFERRED_UPDATE: Cell<bool> = const { Cell::new(false) };
 }
 
 fn with_app<F, R>(f: F) -> Option<R>
@@ -124,8 +125,19 @@ where
     APP.with(|cell| {
         // COM and modal Win32 calls can pump messages and re-enter the window
         // procedure. Never panic across that FFI boundary on a nested borrow.
-        let mut borrow = cell.try_borrow_mut().ok()?;
-        borrow.as_mut().map(f)
+        let result = {
+            let mut borrow = cell.try_borrow_mut().ok()?;
+            borrow.as_mut().map(f)
+        };
+
+        // A re-entrant update notification cannot borrow AppState. Deliver it
+        // only after the outer borrow has actually unwound; immediately
+        // reposting the message can livelock a modal message pump.
+        if result.is_some() && DEFERRED_UPDATE.with(Cell::take) {
+            on_update_available();
+        }
+
+        result
     })
 }
 
@@ -344,33 +356,7 @@ unsafe extern "system" fn msg_wnd_proc(
                 LRESULT(0)
             }
             m if m == update::WM_UPDATE_AVAILABLE => {
-                let handled = with_app(|state| {
-                    let new_version = {
-                        if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
-                            guard.take()
-                        } else {
-                            None
-                        }
-                    };
-                    let Some(version) = new_version else {
-                        return;
-                    };
-                    state.pending_update = Some(version.clone());
-                    state
-                        ._tray
-                        .show_balloon("Language Bubble", &format!("Update available: {}", version));
-                });
-                if handled.is_none() {
-                    // A COM call may have re-entered the window procedure while
-                    // AppState is mutably borrowed. Leave the pending value in
-                    // place and defer delivery until the outer call unwinds.
-                    let _ = PostMessageW(
-                        Some(hwnd),
-                        update::WM_UPDATE_AVAILABLE,
-                        WPARAM(0),
-                        LPARAM(0),
-                    );
-                }
+                on_update_available();
                 LRESULT(0)
             }
             WM_TIMER => {
@@ -404,6 +390,29 @@ unsafe extern "system" fn msg_wnd_proc(
             }
             _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
+    }
+}
+
+fn on_update_available() {
+    let handled = with_app(|state| {
+        let new_version = {
+            if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
+                guard.take()
+            } else {
+                None
+            }
+        };
+        let Some(version) = new_version else {
+            return;
+        };
+        state.pending_update = Some(version.clone());
+        state
+            ._tray
+            .show_balloon("Language Bubble", &format!("Update available: {}", version));
+    });
+    if handled.is_none() {
+        // The pending version remains in the mutex until AppState is available.
+        DEFERRED_UPDATE.with(|pending| pending.set(true));
     }
 }
 
