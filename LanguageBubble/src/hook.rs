@@ -54,6 +54,15 @@ impl HookState {
     fn set_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
         self.bindings.set_switch_mode(combo, mode);
     }
+
+    fn release_captured_space(&mut self, vk: u16, is_up: bool) -> bool {
+        if vk == VK_SPACE.0 && is_up && self.space_held {
+            self.space_held = false;
+            true
+        } else {
+            false
+        }
+    }
 }
 
 thread_local! {
@@ -130,6 +139,12 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
+        // The captured Space key-up must be consumed even if Win was released
+        // first or the binding changed while the keys were held.
+        if state.release_captured_space(vk, is_up) {
+            return LRESULT(1);
+        }
+
         // --- Windows key ---
         if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
             if is_down {
@@ -141,9 +156,9 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     state.win_used_for_combo = false;
                     // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
                     // to prevent Start menu from opening
-                    inject_ctrl_tap();
-                    inject_key(vk, false, true); // synthetic Win up
-                    return LRESULT(1);
+                    if inject_win_combo_release(vk) {
+                        return LRESULT(1);
+                    }
                 }
             }
             return CallNextHookEx(None, code, wparam, lparam);
@@ -187,7 +202,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     && !state.alt_shift_consumed
                     && state.bindings.get(HookKeyCombo::AltShift).switch_mode != SwitchMode::Unused
                 {
-                    inject_ctrl_tap();
+                    let _ = inject_ctrl_tap();
                     let _ = PostMessageW(
                         Some(state.target_hwnd),
                         WM_SWITCH_KEY,
@@ -216,7 +231,7 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     && !state.alt_shift_consumed
                     && state.bindings.get(HookKeyCombo::AltShift).switch_mode != SwitchMode::Unused
                 {
-                    inject_ctrl_tap();
+                    let _ = inject_ctrl_tap();
                     let _ = PostMessageW(
                         Some(state.target_hwnd),
                         WM_SWITCH_KEY,
@@ -264,34 +279,55 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
     }
 }
 
-unsafe fn inject_key(vk: u16, down: bool, tagged: bool) {
-    unsafe {
-        let flags = if down {
-            KEYBD_EVENT_FLAGS(0)
-        } else {
-            KEYEVENTF_KEYUP
-        };
-        let input = INPUT {
-            r#type: INPUT_KEYBOARD,
-            Anonymous: INPUT_0 {
-                ki: KEYBDINPUT {
-                    wVk: VIRTUAL_KEY(vk),
-                    wScan: 0,
-                    dwFlags: flags,
-                    time: 0,
-                    dwExtraInfo: if tagged { SELF_INJECTED_TAG } else { 0 },
-                },
+fn keyboard_input(vk: u16, down: bool) -> INPUT {
+    let flags = if down {
+        KEYBD_EVENT_FLAGS(0)
+    } else {
+        KEYEVENTF_KEYUP
+    };
+    INPUT {
+        r#type: INPUT_KEYBOARD,
+        Anonymous: INPUT_0 {
+            ki: KEYBDINPUT {
+                wVk: VIRTUAL_KEY(vk),
+                wScan: 0,
+                dwFlags: flags,
+                time: 0,
+                dwExtraInfo: SELF_INJECTED_TAG,
             },
-        };
-        SendInput(&[input], std::mem::size_of::<INPUT>() as i32);
+        },
     }
 }
 
-unsafe fn inject_ctrl_tap() {
-    unsafe {
-        inject_key(VK_CONTROL.0, true, true);
-        inject_key(VK_CONTROL.0, false, true);
+unsafe fn send_inputs(inputs: &[INPUT]) -> bool {
+    unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) == inputs.len() as u32 }
+}
+
+unsafe fn inject_win_combo_release(vk: u16) -> bool {
+    let inputs = [
+        keyboard_input(VK_CONTROL.0, true),
+        keyboard_input(VK_CONTROL.0, false),
+        keyboard_input(vk, false),
+    ];
+    let complete = unsafe { send_inputs(&inputs) };
+    if !complete {
+        // If SendInput accepted only a prefix, make a best-effort attempt to
+        // release both modifiers before passing the real Win-up through.
+        let releases = [
+            keyboard_input(VK_CONTROL.0, false),
+            keyboard_input(vk, false),
+        ];
+        let _ = unsafe { send_inputs(&releases) };
     }
+    complete
+}
+
+unsafe fn inject_ctrl_tap() -> bool {
+    let inputs = [
+        keyboard_input(VK_CONTROL.0, true),
+        keyboard_input(VK_CONTROL.0, false),
+    ];
+    unsafe { send_inputs(&inputs) }
 }
 
 #[cfg(test)]
@@ -327,5 +363,16 @@ mod tests {
             state.bindings.get(HookKeyCombo::CapsLock).switch_mode,
             SwitchMode::AllLanguage
         );
+    }
+
+    #[test]
+    fn captured_space_is_released_even_after_win_is_released_first() {
+        let mut state = HookState::new(HWND::default(), KeyBindings::default());
+        state.space_held = true;
+        state.win_held = false;
+
+        assert!(state.release_captured_space(VK_SPACE.0, true));
+        assert!(!state.space_held);
+        assert!(!state.release_captured_space(VK_SPACE.0, true));
     }
 }

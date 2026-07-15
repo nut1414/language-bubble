@@ -13,7 +13,7 @@ mod tray;
 mod types;
 mod update;
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::mem;
 
 use windows::Win32::Foundation::*;
@@ -47,6 +47,47 @@ struct AppState {
     pending_update: Option<String>,
 }
 
+struct ComApartment;
+
+impl ComApartment {
+    fn initialize() -> Result<Self> {
+        unsafe {
+            CoInitializeEx(None, COINIT_APARTMENTTHREADED).ok()?;
+        }
+        Ok(Self)
+    }
+}
+
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        unsafe {
+            let _ = CloseHandle(self.0);
+        }
+    }
+}
+
+struct OwnedWindow(HWND);
+
+impl Drop for OwnedWindow {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.0.is_invalid() {
+                let _ = DestroyWindow(self.0);
+            }
+        }
+    }
+}
+
+impl Drop for ComApartment {
+    fn drop(&mut self) {
+        unsafe {
+            CoUninitialize();
+        }
+    }
+}
+
 impl AppState {
     fn tray_menu_snapshot(&self) -> tray::TrayMenuSnapshot {
         tray::TrayMenuSnapshot {
@@ -73,6 +114,7 @@ impl AppState {
 // Everything runs on the main (message pump) thread, so thread_local RefCell is safe.
 thread_local! {
     static APP: RefCell<Option<AppState>> = const { RefCell::new(None) };
+    static DEFERRED_SWITCH: Cell<Option<HookKeyCombo>> = const { Cell::new(None) };
 }
 
 fn with_app<F, R>(f: F) -> Option<R>
@@ -80,12 +122,20 @@ where
     F: FnOnce(&mut AppState) -> R,
 {
     APP.with(|cell| {
-        let mut borrow = cell.borrow_mut();
+        // COM and modal Win32 calls can pump messages and re-enter the window
+        // procedure. Never panic across that FFI boundary on a nested borrow.
+        let mut borrow = cell.try_borrow_mut().ok()?;
         borrow.as_mut().map(f)
     })
 }
 
 fn main() {
+    if let Err(error) = run() {
+        show_startup_error(&error);
+    }
+}
+
+fn run() -> Result<()> {
     // Declare Per-Monitor DPI Awareness v2 before any window creation.
     // Without this, Windows virtualizes coordinates at 96 DPI and
     // bitmap-stretches the window, causing blurriness at >100% scaling.
@@ -95,24 +145,26 @@ fn main() {
     }
 
     // COM initialization for UI Automation
-    unsafe {
-        let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
-    }
+    let _com_apartment = ComApartment::initialize()?;
 
     // Single-instance check
-    let _mutex = unsafe {
-        let h = CreateMutexW(None, true, MUTEX_NAME).ok();
-        if h.is_none() || windows::Win32::Foundation::GetLastError() == ERROR_ALREADY_EXISTS {
+    let (mutex, already_running) = unsafe {
+        let handle = CreateMutexW(None, true, MUTEX_NAME)?;
+        let already_running = GetLastError() == ERROR_ALREADY_EXISTS;
+        (OwnedHandle(handle), already_running)
+    };
+    let _mutex = mutex;
+    if already_running {
+        unsafe {
             let _ = MessageBoxW(
                 None,
                 w!("Language Bubble is already running."),
                 w!("Language Bubble"),
                 MB_OK | MB_ICONINFORMATION,
             );
-            return;
         }
-        h
-    };
+        return Ok(());
+    }
 
     let settings_store = settings::UserSettingsStore::registry();
     settings::report_result(
@@ -134,7 +186,8 @@ fn main() {
     let pending_update = update::pending_from_registry(settings_store);
 
     // Create message-only window
-    let msg_hwnd = create_msg_window();
+    let msg_window = OwnedWindow(create_msg_window()?);
+    let msg_hwnd = msg_window.0;
 
     // Language service
     let mut language_service = language::LanguageService::new();
@@ -144,8 +197,7 @@ fn main() {
     }
 
     // Bubble window
-    let mut bubble_win =
-        bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
+    let mut bubble_win = bubble::BubbleWindow::new(msg_hwnd)?;
     bubble_win.set_size(settings_store.bubble_size());
     bubble_win.set_theme_mode(theme_mode);
     bubble_win.set_custom_colors(custom_colors);
@@ -170,8 +222,7 @@ fn main() {
     }
 
     // Install keyboard hook
-    let installed_hook =
-        hook::InstalledHook::install(msg_hwnd, &bindings).expect("Failed to install keyboard hook");
+    let installed_hook = hook::InstalledHook::install(msg_hwnd, &bindings)?;
 
     // Force Caps Lock off on startup if intercepting
     if bindings.get(HookKeyCombo::CapsLock).switch_mode != SwitchMode::Unused {
@@ -198,24 +249,44 @@ fn main() {
     });
 
     // Message loop
-    unsafe {
+    let message_loop_result = unsafe {
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
+        loop {
+            let status = GetMessageW(&mut msg, None, 0, 0).0;
+            if status == -1 {
+                break Err(Error::from_win32());
+            }
+            if status == 0 {
+                break Ok(());
+            }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
-    }
+    };
 
     // Cleanup
     APP.with(|cell| {
         *cell.borrow_mut() = None;
     });
+    message_loop_result
 }
 
-fn create_msg_window() -> HWND {
+fn show_startup_error(error: &Error) {
+    let message = format!("Language Bubble could not start.\n\n{error}");
+    let wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
     unsafe {
-        let hinstance =
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
+        let _ = MessageBoxW(
+            None,
+            PCWSTR(wide.as_ptr()),
+            w!("Language Bubble"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn create_msg_window() -> Result<HWND> {
+    unsafe {
+        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(msg_wnd_proc),
@@ -239,7 +310,6 @@ fn create_msg_window() -> HWND {
             Some(hinstance.into()),
             None,
         )
-        .unwrap()
     }
 }
 
@@ -274,21 +344,32 @@ unsafe extern "system" fn msg_wnd_proc(
                 LRESULT(0)
             }
             m if m == update::WM_UPDATE_AVAILABLE => {
-                let new_version = {
-                    if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
-                        guard.take()
-                    } else {
-                        None
-                    }
-                };
-                if let Some(version) = new_version {
-                    with_app(|state| {
-                        state.pending_update = Some(version.clone());
-                        state._tray.show_balloon(
-                            "Language Bubble",
-                            &format!("Update available: {}", version),
-                        );
-                    });
+                let handled = with_app(|state| {
+                    let new_version = {
+                        if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
+                            guard.take()
+                        } else {
+                            None
+                        }
+                    };
+                    let Some(version) = new_version else {
+                        return;
+                    };
+                    state.pending_update = Some(version.clone());
+                    state
+                        ._tray
+                        .show_balloon("Language Bubble", &format!("Update available: {}", version));
+                });
+                if handled.is_none() {
+                    // A COM call may have re-entered the window procedure while
+                    // AppState is mutably borrowed. Leave the pending value in
+                    // place and defer delivery until the outer call unwinds.
+                    let _ = PostMessageW(
+                        Some(hwnd),
+                        update::WM_UPDATE_AVAILABLE,
+                        WPARAM(0),
+                        LPARAM(0),
+                    );
                 }
                 LRESULT(0)
             }
@@ -310,13 +391,10 @@ unsafe extern "system" fn msg_wnd_proc(
                 LRESULT(0)
             }
             WM_SETTINGCHANGE => {
-                if lparam.0 != 0 {
-                    let param = PCWSTR(lparam.0 as *const u16);
-                    if param == w!("ImmersiveColorSet") {
-                        with_app(|state| {
-                            state.bubble.refresh_theme();
-                        });
-                    }
+                if is_system_theme_change(lparam) {
+                    with_app(|state| {
+                        state.bubble.refresh_theme();
+                    });
                 }
                 LRESULT(0)
             }
@@ -329,8 +407,27 @@ unsafe extern "system" fn msg_wnd_proc(
     }
 }
 
+/// Returns whether `lparam` names the Windows immersive color setting.
+///
+/// # Safety
+///
+/// For `WM_SETTINGCHANGE`, Windows guarantees that a non-null `lparam` points
+/// to a null-terminated UTF-16 string for the duration of the callback.
+unsafe fn is_system_theme_change(lparam: LPARAM) -> bool {
+    if lparam.0 == 0 {
+        return false;
+    }
+
+    let setting_name = PCWSTR(lparam.0 as *const u16);
+    unsafe {
+        setting_name
+            .to_string()
+            .is_ok_and(|name| name == "ImmersiveColorSet")
+    }
+}
+
 fn on_switch_key(combo: HookKeyCombo) {
-    with_app(|state| {
+    let handled = with_app(|state| {
         if state.is_switching {
             state.pending_combo = Some(combo);
             return;
@@ -338,6 +435,9 @@ fn on_switch_key(combo: HookKeyCombo) {
         state.is_switching = true;
         process_switch(state, combo);
     });
+    if handled.is_none() {
+        DEFERRED_SWITCH.with(|pending| pending.set(Some(combo)));
+    }
 }
 
 fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
@@ -347,6 +447,9 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
         state.is_switching = false;
         return;
     }
+
+    // Input methods can be added or removed while the utility is running.
+    state.language_service.refresh_layouts();
 
     // Set display mode for this key binding
     state.bubble.display_mode = binding.display_mode;
@@ -398,7 +501,10 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
         .show_bubble(&display_layouts, selected_index, caret_pos);
 
     // Process pending
-    let pending = state.pending_combo.take();
+    let pending = state
+        .pending_combo
+        .take()
+        .or_else(|| DEFERRED_SWITCH.with(Cell::take));
     if let Some(next_combo) = pending {
         process_switch(state, next_combo);
     } else {
@@ -565,6 +671,26 @@ fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
             Some(cc.rgbResult.0)
         } else {
             None
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn system_theme_change_compares_setting_contents() {
+        let immersive: Vec<u16> = "ImmersiveColorSet"
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let unrelated: Vec<u16> = "intl".encode_utf16().chain(std::iter::once(0)).collect();
+
+        unsafe {
+            assert!(is_system_theme_change(LPARAM(immersive.as_ptr() as isize)));
+            assert!(!is_system_theme_change(LPARAM(unrelated.as_ptr() as isize)));
+            assert!(!is_system_theme_change(LPARAM(0)));
         }
     }
 }

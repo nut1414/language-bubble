@@ -85,7 +85,7 @@ impl BubbleWindow {
         let dwrite_factory: IDWriteFactory =
             unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
 
-        let hwnd = create_overlay_window();
+        let hwnd = create_overlay_window()?;
 
         let mut bw = Self {
             hwnd,
@@ -365,13 +365,23 @@ impl BubbleWindow {
 
     fn render(&mut self) {
         self.ensure_render_target();
-        let Some(rt) = &self.render_target else {
-            return;
-        };
-        let Some(fmt) = &self.text_format else {
-            return;
+        let result = match (&self.render_target, &self.text_format) {
+            (Some(render_target), Some(text_format)) => self.draw_frame(render_target, text_format),
+            _ => return,
         };
 
+        // EndDraw reports device loss through D2DERR_RECREATE_TARGET. Dropping
+        // all target-dependent resources lets the next animation tick recover.
+        if result.is_err() {
+            self.render_target = None;
+        }
+    }
+
+    fn draw_frame(
+        &self,
+        rt: &ID2D1HwndRenderTarget,
+        fmt: &IDWriteTextFormat,
+    ) -> windows::core::Result<()> {
         let metrics = self.size.metrics();
         let opacity = self.anim.opacity();
         let (bg_color, border_color, fg_base) = match self.theme_mode {
@@ -427,90 +437,91 @@ impl BubbleWindow {
 
         unsafe {
             rt.BeginDraw();
-            rt.Clear(Some(&D2D1_COLOR_F {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            }));
+            let draw_result = (|| -> windows::core::Result<()> {
+                rt.Clear(Some(&D2D1_COLOR_F {
+                    r: 0.0,
+                    g: 0.0,
+                    b: 0.0,
+                    a: 0.0,
+                }));
 
-            let size = rt.GetSize();
+                let size = rt.GetSize();
 
-            // Background rounded rect
-            let bg_brush = rt
-                .CreateSolidColorBrush(
+                // Background rounded rect
+                let bg_brush = rt.CreateSolidColorBrush(
                     &D2D1_COLOR_F {
                         a: bg_color.a * opacity,
                         ..bg_color
                     },
                     None,
-                )
-                .unwrap();
-            let rrect = D2D1_ROUNDED_RECT {
-                rect: D2D_RECT_F {
-                    left: 0.5,
-                    top: 0.5,
-                    right: size.width - 0.5,
-                    bottom: size.height - 0.5,
-                },
-                radiusX: metrics.corner_radius,
-                radiusY: metrics.corner_radius,
-            };
-            rt.FillRoundedRectangle(&rrect, &bg_brush);
+                )?;
+                let rrect = D2D1_ROUNDED_RECT {
+                    rect: D2D_RECT_F {
+                        left: 0.5,
+                        top: 0.5,
+                        right: size.width - 0.5,
+                        bottom: size.height - 0.5,
+                    },
+                    radiusX: metrics.corner_radius,
+                    radiusY: metrics.corner_radius,
+                };
+                rt.FillRoundedRectangle(&rrect, &bg_brush);
 
-            // Border
-            let border_brush = rt
-                .CreateSolidColorBrush(
+                // Border
+                let border_brush = rt.CreateSolidColorBrush(
                     &D2D1_COLOR_F {
                         a: border_color.a * opacity,
                         ..border_color
                     },
                     None,
-                )
-                .unwrap();
-            rt.DrawRoundedRectangle(&rrect, &border_brush, 0.5, None);
+                )?;
+                rt.DrawRoundedRectangle(&rrect, &border_brush, 0.5, None);
 
-            // Draw labels
-            let slide_offset =
-                if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1 {
-                    self.anim.slide_offset()
-                } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                    0.0 // All labels visible, no row offset
-                } else {
-                    -(self.selected_index as f32 * metrics.item_width)
-                };
+                // Draw labels
+                let slide_offset =
+                    if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1 {
+                        self.anim.slide_offset()
+                    } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
+                        0.0 // All labels visible, no row offset
+                    } else {
+                        -(self.selected_index as f32 * metrics.item_width)
+                    };
 
-            for (i, label_text) in self.labels.iter().enumerate() {
-                let label_opacity = self.get_label_opacity(i as i32);
-                let fg_color = D2D1_COLOR_F {
-                    a: label_opacity * opacity,
-                    ..fg_base
-                };
-                let fg_brush = rt.CreateSolidColorBrush(&fg_color, None).unwrap();
+                for (i, label_text) in self.labels.iter().enumerate() {
+                    let label_opacity = self.get_label_opacity(i as i32);
+                    let fg_color = D2D1_COLOR_F {
+                        a: label_opacity * opacity,
+                        ..fg_base
+                    };
+                    let fg_brush = rt.CreateSolidColorBrush(&fg_color, None)?;
 
-                let x = metrics.padding + i as f32 * metrics.item_width + slide_offset;
-                let y = metrics.padding;
+                    let x = metrics.padding + i as f32 * metrics.item_width + slide_offset;
+                    let y = metrics.padding;
 
-                let rect = D2D_RECT_F {
-                    left: x,
-                    top: y,
-                    right: x + metrics.item_width,
-                    bottom: y + metrics.item_height,
-                };
+                    let rect = D2D_RECT_F {
+                        left: x,
+                        top: y,
+                        right: x + metrics.item_width,
+                        bottom: y + metrics.item_height,
+                    };
 
-                let wide: Vec<u16> = label_text.encode_utf16().collect();
-                rt.DrawText(
-                    &wide,
-                    fmt,
-                    &rect,
-                    &fg_brush,
-                    D2D1_DRAW_TEXT_OPTIONS_NONE,
-                    DWRITE_MEASURING_MODE_NATURAL,
-                );
-            }
+                    let wide: Vec<u16> = label_text.encode_utf16().collect();
+                    rt.DrawText(
+                        &wide,
+                        fmt,
+                        &rect,
+                        &fg_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
 
-            let _ = rt.EndDraw(None, None);
+                Ok(())
+            })();
+            let end_result = rt.EndDraw(None, None);
+            draw_result.and(end_result)?;
         }
+        Ok(())
     }
 
     /// Get the *target* opacity for a label (what it should settle at).
@@ -620,6 +631,16 @@ impl BubbleWindow {
     }
 }
 
+impl Drop for BubbleWindow {
+    fn drop(&mut self) {
+        unsafe {
+            if !self.hwnd.is_invalid() {
+                let _ = DestroyWindow(self.hwnd);
+            }
+        }
+    }
+}
+
 fn work_area_from_rect(rect: RECT) -> WorkArea {
     WorkArea {
         left: rect.left,
@@ -629,10 +650,9 @@ fn work_area_from_rect(rect: RECT) -> WorkArea {
     }
 }
 
-fn create_overlay_window() -> HWND {
+fn create_overlay_window() -> windows::core::Result<HWND> {
     unsafe {
-        let hinstance =
-            windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
+        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)?;
         let wc = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -657,8 +677,7 @@ fn create_overlay_window() -> HWND {
             None,
             Some(hinstance.into()),
             None,
-        )
-        .unwrap();
+        )?;
 
         // DWM composition for hardware transparency
         let margins = MARGINS {
@@ -672,7 +691,7 @@ fn create_overlay_window() -> HWND {
         // Make layered window fully opaque (DWM handles the transparency)
         SetLayeredWindowAttributes(hwnd, COLORREF(0), 255, LWA_ALPHA).ok();
 
-        hwnd
+        Ok(hwnd)
     }
 }
 

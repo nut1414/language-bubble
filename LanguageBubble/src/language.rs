@@ -42,7 +42,12 @@ impl LanguageService {
                 return;
             }
             let mut hkls = vec![HKL::default(); count];
-            GetKeyboardLayoutList(Some(&mut hkls));
+            let copied = GetKeyboardLayoutList(Some(&mut hkls));
+            if copied <= 0 {
+                self.layouts.clear();
+                return;
+            }
+            hkls.truncate(copied as usize);
             self.layouts = hkls.into_iter().map(make_layout_info).collect();
         }
     }

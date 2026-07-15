@@ -224,32 +224,44 @@ impl<B: SettingsBackend> SettingsStore<B> {
     }
 
     pub fn migrate_old_settings(&self) -> Result<()> {
-        if self.read_string("CapsLockMode").is_some() {
-            return Ok(());
+        if self.backend.read_string("CapsLockMode")?.is_none() {
+            let mode = if self.backend.read_string("MruSwitching")?.as_deref() == Some("True") {
+                SwitchMode::Mru
+            } else {
+                SwitchMode::AllLanguage
+            };
+            self.backend.write_string("CapsLockMode", mode.as_str())?;
         }
-        let mode = if self.read_string("MruSwitching").as_deref() == Some("True") {
-            SwitchMode::Mru
-        } else {
-            SwitchMode::AllLanguage
-        };
-        self.backend.write_string("CapsLockMode", mode.as_str())?;
+
         self.backend.delete_value("MruSwitching")
     }
 
     pub fn migrate_display_mode_settings(&self) -> Result<()> {
-        if self.read_string("CapsLockDisplayMode").is_some() {
+        const DISPLAY_MODE_KEYS: [&str; 3] = [
+            "CapsLockDisplayMode",
+            "WinSpaceDisplayMode",
+            "AltShiftDisplayMode",
+        ];
+
+        let mut missing_keys = Vec::new();
+        for key in DISPLAY_MODE_KEYS {
+            if self.backend.read_string(key)?.is_none() {
+                missing_keys.push(key);
+            }
+        }
+        if missing_keys.is_empty() {
             return Ok(());
         }
+
         let mode = self
-            .read_string("DisplayMode")
+            .backend
+            .read_string("DisplayMode")?
             .map(|value| DisplayMode::from_str(&value))
             .unwrap_or(DisplayMode::Carousel);
-        self.backend
-            .write_string("CapsLockDisplayMode", mode.as_str())?;
-        self.backend
-            .write_string("WinSpaceDisplayMode", mode.as_str())?;
-        self.backend
-            .write_string("AltShiftDisplayMode", mode.as_str())
+        for key in missing_keys {
+            self.backend.write_string(key, mode.as_str())?;
+        }
+        Ok(())
     }
 }
 
@@ -367,7 +379,8 @@ mod tests {
     #[derive(Clone, Default)]
     struct MemoryBackend {
         values: Rc<RefCell<HashMap<String, String>>>,
-        fail: Rc<Cell<bool>>,
+        fail_reads: Rc<Cell<bool>>,
+        fail_writes: Rc<Cell<bool>>,
     }
 
     impl MemoryBackend {
@@ -378,14 +391,14 @@ mod tests {
 
     impl SettingsBackend for MemoryBackend {
         fn read_string(&self, key: &str) -> Result<Option<String>> {
-            if self.fail.get() {
+            if self.fail_reads.get() {
                 return Err(Error::new(GENERIC_FAILURE, "memory backend failure"));
             }
             Ok(self.value(key))
         }
 
         fn write_string(&self, key: &str, value: &str) -> Result<()> {
-            if self.fail.get() {
+            if self.fail_writes.get() {
                 return Err(Error::new(GENERIC_FAILURE, "memory backend failure"));
             }
             self.values
@@ -395,7 +408,7 @@ mod tests {
         }
 
         fn delete_value(&self, key: &str) -> Result<()> {
-            if self.fail.get() {
+            if self.fail_writes.get() {
                 return Err(Error::new(GENERIC_FAILURE, "memory backend failure"));
             }
             self.values.borrow_mut().remove(key);
@@ -521,9 +534,41 @@ mod tests {
     }
 
     #[test]
+    fn display_migration_preserves_existing_values_and_fills_missing_ones() {
+        let backend = MemoryBackend::default();
+        backend
+            .write_string("CapsLockDisplayMode", "Simple")
+            .unwrap();
+        backend.write_string("DisplayMode", "Expanded").unwrap();
+        let store = SettingsStore::new(backend.clone());
+
+        store.migrate_display_mode_settings().unwrap();
+
+        assert_eq!(
+            backend.value("CapsLockDisplayMode").as_deref(),
+            Some("Simple")
+        );
+        for key in ["WinSpaceDisplayMode", "AltShiftDisplayMode"] {
+            assert_eq!(backend.value(key).as_deref(), Some("Expanded"));
+        }
+    }
+
+    #[test]
+    fn migration_read_failures_do_not_write_defaults() {
+        let backend = MemoryBackend::default();
+        backend.fail_reads.set(true);
+        let store = SettingsStore::new(backend.clone());
+
+        assert!(store.migrate_old_settings().is_err());
+        assert!(store.migrate_display_mode_settings().is_err());
+        assert!(backend.values.borrow().is_empty());
+    }
+
+    #[test]
     fn backend_failures_fall_back_and_remain_reportable() {
         let backend = MemoryBackend::default();
-        backend.fail.set(true);
+        backend.fail_reads.set(true);
+        backend.fail_writes.set(true);
         let store = SettingsStore::new(backend);
         assert_eq!(store.bubble_size(), BubbleSize::Medium);
         assert!(store.save_bubble_size(BubbleSize::Large).is_err());
