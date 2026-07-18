@@ -10,6 +10,10 @@ use windows::core::{Error, HRESULT, Result};
 
 use crate::types::*;
 
+mod win_space;
+
+use win_space::{WinKey, WinSpaceEvent, WinSpaceState};
+
 /// Custom message posted to the main window when a switch key is pressed.
 pub const WM_SWITCH_KEY: u32 = WM_APP + 1;
 /// Custom message posted to the main window when any key is pressed.
@@ -25,11 +29,9 @@ static SUPPRESS_SELF: AtomicBool = AtomicBool::new(false);
 struct HookState {
     target_hwnd: HWND,
     bindings: KeyBindings,
-    win_held: bool,
-    win_used_for_combo: bool,
+    win_space: WinSpaceState,
     alt_held: bool,
     shift_held: bool,
-    space_held: bool,
     caps_held: bool,
     alt_shift_primed: bool,
     alt_shift_consumed: bool,
@@ -40,11 +42,9 @@ impl HookState {
         Self {
             target_hwnd,
             bindings,
-            win_held: false,
-            win_used_for_combo: false,
+            win_space: WinSpaceState::default(),
             alt_held: false,
             shift_held: false,
-            space_held: false,
             caps_held: false,
             alt_shift_primed: false,
             alt_shift_consumed: false,
@@ -53,15 +53,6 @@ impl HookState {
 
     fn set_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
         self.bindings.set_switch_mode(combo, mode);
-    }
-
-    fn release_captured_space(&mut self, vk: u16, is_up: bool) -> bool {
-        if vk == VK_SPACE.0 && is_up && self.space_held {
-            self.space_held = false;
-            true
-        } else {
-            false
-        }
     }
 }
 
@@ -139,39 +130,24 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
 
-        // The captured Space key-up must be consumed even if Win was released
-        // first or the binding changed while the keys were held.
-        if state.release_captured_space(vk, is_up) {
-            return LRESULT(1);
-        }
+        // --- Win + Space ---
+        let win_space_event = match vk {
+            v if v == VK_LWIN.0 && is_down => Some(WinSpaceEvent::WinDown(WinKey::Left)),
+            v if v == VK_LWIN.0 && is_up => Some(WinSpaceEvent::WinUp(WinKey::Left)),
+            v if v == VK_RWIN.0 && is_down => Some(WinSpaceEvent::WinDown(WinKey::Right)),
+            v if v == VK_RWIN.0 && is_up => Some(WinSpaceEvent::WinUp(WinKey::Right)),
+            v if v == VK_SPACE.0 && is_down => Some(WinSpaceEvent::SpaceDown),
+            v if v == VK_SPACE.0 && is_up => Some(WinSpaceEvent::SpaceUp),
+            _ => None,
+        };
 
-        // --- Windows key ---
-        if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
-            if is_down {
-                state.win_held = true;
-                state.win_used_for_combo = false;
-            } else if is_up {
-                state.win_held = false;
-                if state.win_used_for_combo {
-                    state.win_used_for_combo = false;
-                    // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
-                    // to prevent Start menu from opening
-                    if inject_win_combo_release(vk) {
-                        return LRESULT(1);
-                    }
-                }
-            }
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-
-        // --- Space (when Win held) ---
-        if vk == VK_SPACE.0
-            && state.win_held
-            && state.bindings.get(HookKeyCombo::WinSpace).switch_mode != SwitchMode::Unused
+        if let Some(event) = win_space_event
+            && let Some(decision) = state.win_space.handle(
+                event,
+                state.bindings.get(HookKeyCombo::WinSpace).switch_mode != SwitchMode::Unused,
+            )
         {
-            if is_down && !state.space_held {
-                state.space_held = true;
-                state.win_used_for_combo = true;
+            if decision.switch_layout {
                 if state.alt_held && state.shift_held {
                     state.alt_shift_consumed = true;
                 }
@@ -181,10 +157,21 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
                     WPARAM(HookKeyCombo::WinSpace as usize),
                     LPARAM(0),
                 );
-            } else if is_up {
-                state.space_held = false;
             }
-            return LRESULT(1); // Suppress both down and up
+
+            if decision.neutralize_start {
+                // Suppress the real Win key-up only when the full Ctrl tap and
+                // synthetic Win-up sequence was injected successfully.
+                if inject_win_combo_release(vk) {
+                    return LRESULT(1);
+                }
+                return CallNextHookEx(None, code, wparam, lparam);
+            }
+
+            if decision.suppress {
+                return LRESULT(1);
+            }
+            return CallNextHookEx(None, code, wparam, lparam);
         }
 
         // --- Alt key ---
@@ -340,11 +327,8 @@ mod tests {
         let state = HookState::new(HWND::default(), bindings);
 
         assert_eq!(state.bindings, bindings);
-        assert!(!state.win_held);
-        assert!(!state.win_used_for_combo);
         assert!(!state.alt_held);
         assert!(!state.shift_held);
-        assert!(!state.space_held);
         assert!(!state.caps_held);
         assert!(!state.alt_shift_primed);
         assert!(!state.alt_shift_consumed);
@@ -363,16 +347,5 @@ mod tests {
             state.bindings.get(HookKeyCombo::CapsLock).switch_mode,
             SwitchMode::AllLanguage
         );
-    }
-
-    #[test]
-    fn captured_space_is_released_even_after_win_is_released_first() {
-        let mut state = HookState::new(HWND::default(), KeyBindings::default());
-        state.space_held = true;
-        state.win_held = false;
-
-        assert!(state.release_captured_space(VK_SPACE.0, true));
-        assert!(!state.space_held);
-        assert!(!state.release_captured_space(VK_SPACE.0, true));
     }
 }
