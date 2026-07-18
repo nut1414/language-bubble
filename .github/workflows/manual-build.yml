@@ -21,10 +21,6 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       BUILD_TARGET: ${{ matrix.target }}
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
-      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
-      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: link.exe
-      CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
 
     steps:
       - name: Check out selected branch
