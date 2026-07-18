@@ -9,6 +9,39 @@ Language Bubble releases use one version in three related formats:
 `LanguageBubble/Cargo.toml` is the source of truth. The bump and packaging
 scripts keep the lockfile and MSIX manifest synchronized with it.
 
+## TL;DR
+
+For a minor release, start from a clean `main` branch and replace `0.5.0`
+below with the version printed by the bump script:
+
+```powershell
+git switch main
+git pull --ff-only
+git status --short
+
+.\scripts\bump-version.ps1 minor
+
+Push-Location LanguageBubble
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+Pop-Location
+
+.\scripts\package-msix.ps1
+
+git diff --check
+git add LanguageBubble/Cargo.toml `
+    LanguageBubble/Cargo.lock `
+    LanguageBubble.Package/Package.appxmanifest
+git commit -m "bump version to 0.5.0"
+git tag v0.5.0
+git push origin main v0.5.0
+```
+
+Upload `release/LanguageBubble_0.5.0.0.msixbundle` manually in Partner
+Center. Use `patch` or `major` instead of `minor` when appropriate. The
+sections below explain prerequisites, options, version rules, and recovery.
+
 ## One-time setup
 
 Install:
