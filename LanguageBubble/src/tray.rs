@@ -1,4 +1,3 @@
-use std::collections::HashSet;
 use std::mem;
 
 use windows::Win32::Foundation::*;
@@ -39,8 +38,6 @@ const CMD_CUSTOM_FG_COLOR: u16 = 1411;
 const CMD_OPACITY_BASE: u16 = 1420;
 const CMD_CHECK_UPDATES_TOGGLE: u16 = 1503;
 const CMD_DOWNLOAD_UPDATE: u16 = 1504;
-const CMD_LANGUAGE_LABEL_BASE: u16 = 1600;
-const MAX_PRIMARY_LANGUAGE_ID: u16 = 0x03FF;
 
 const SIZE_VALUES: [BubbleSize; 5] = [
     BubbleSize::ExtraSmall,
@@ -85,7 +82,6 @@ pub enum TrayCommand {
     SetOpacity(u8),
     ToggleUpdateChecks,
     DownloadUpdate,
-    EditLanguage(u16),
 }
 
 impl TrayCommand {
@@ -111,7 +107,6 @@ impl TrayCommand {
             }
             Self::ToggleUpdateChecks => CMD_CHECK_UPDATES_TOGGLE,
             Self::DownloadUpdate => CMD_DOWNLOAD_UPDATE,
-            Self::EditLanguage(primary_lang_id) => language_command_id(primary_lang_id)?,
         };
         Some(id)
     }
@@ -139,9 +134,6 @@ impl TrayCommand {
         if let Some(value) = value_from_id(id, CMD_OPACITY_BASE, &OPACITY_VALUES) {
             return Some(Self::SetOpacity(value));
         }
-        if let Some(primary_lang_id) = primary_language_from_command(id) {
-            return Some(Self::EditLanguage(primary_lang_id));
-        }
 
         for combo in HookKeyCombo::ALL {
             if let Some(mode) = value_from_id(id, switch_mode_base(combo), &SWITCH_MODE_VALUES) {
@@ -163,16 +155,6 @@ fn value_index<T: Copy + PartialEq>(values: &[T], value: T) -> Option<usize> {
 fn value_from_id<T: Copy>(id: u16, base: u16, values: &[T]) -> Option<T> {
     let index = id.checked_sub(base)? as usize;
     values.get(index).copied()
-}
-
-fn language_command_id(primary_lang_id: u16) -> Option<u16> {
-    (primary_lang_id <= MAX_PRIMARY_LANGUAGE_ID)
-        .then(|| CMD_LANGUAGE_LABEL_BASE.checked_add(primary_lang_id))?
-}
-
-fn primary_language_from_command(command_id: u16) -> Option<u16> {
-    let primary_lang_id = command_id.checked_sub(CMD_LANGUAGE_LABEL_BASE)?;
-    (primary_lang_id <= MAX_PRIMARY_LANGUAGE_ID).then_some(primary_lang_id)
 }
 
 const fn switch_mode_base(combo: HookKeyCombo) -> u16 {
@@ -335,38 +317,6 @@ pub fn show_context_menu(hwnd: HWND, snapshot: &TrayMenuSnapshot) -> Option<Tray
             flags |= MF_DISABLED;
             let _ = AppendMenuW(menu, flags, 0, PCWSTR(wide.as_ptr()));
         }
-
-        let label_menu = CreatePopupMenu().ok()?;
-        let mut seen_languages = HashSet::new();
-        let mut language_count = 0usize;
-        for layout in layouts {
-            if !seen_languages.insert(layout.primary_lang_id) {
-                continue;
-            }
-            let Some(command) = TrayCommand::EditLanguage(layout.primary_lang_id).id() else {
-                continue;
-            };
-            let text = format!("{} - {}", layout.bubble_text, layout.english_name);
-            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(
-                label_menu,
-                MF_STRING,
-                command as usize,
-                PCWSTR(wide.as_ptr()),
-            );
-            language_count += 1;
-        }
-        let label_menu_flags = if language_count == 0 {
-            MF_POPUP | MF_GRAYED
-        } else {
-            MF_POPUP
-        };
-        let _ = AppendMenuW(
-            menu,
-            label_menu_flags,
-            label_menu.0 as usize,
-            w!("Language Labels"),
-        );
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
@@ -699,8 +649,6 @@ mod tests {
             TrayCommand::PickCustomForeground,
             TrayCommand::ToggleUpdateChecks,
             TrayCommand::DownloadUpdate,
-            TrayCommand::EditLanguage(0x0009),
-            TrayCommand::EditLanguage(0x0019),
         ];
         commands.extend(SIZE_VALUES.into_iter().map(TrayCommand::SetSize));
         commands.extend(THEME_VALUES.into_iter().map(TrayCommand::SetTheme));
@@ -743,8 +691,6 @@ mod tests {
             (TrayCommand::PickCustomForeground, 1411),
             (TrayCommand::ToggleUpdateChecks, 1503),
             (TrayCommand::DownloadUpdate, 1504),
-            (TrayCommand::EditLanguage(0x0009), 1609),
-            (TrayCommand::EditLanguage(0x0019), 1625),
         ];
         for (command, expected) in fixed {
             assert_eq!(command.id(), Some(expected));
@@ -802,13 +748,10 @@ mod tests {
             1427,
             1502,
             1505,
-            1599,
-            2624,
             u16::MAX,
         ] {
             assert_eq!(TrayCommand::from_id(id), None, "ID {id} should be invalid");
         }
         assert_eq!(TrayCommand::SetOpacity(0).id(), None);
-        assert_eq!(TrayCommand::EditLanguage(0x0400).id(), None);
     }
 }

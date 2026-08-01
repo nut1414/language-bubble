@@ -6,7 +6,6 @@ mod bubble_layout;
 mod capslock;
 mod caret;
 mod hook;
-mod label_dialog;
 mod language;
 mod registry;
 mod settings;
@@ -204,7 +203,6 @@ fn run() -> Result<()> {
 
     // Language service
     let mut language_service = language::LanguageService::new();
-    language_service.sync_label_overrides(|language_id| settings_store.bubble_label(language_id));
     if let Some(initial) = language_service.get_current_layout() {
         let hkl = initial.hkl;
         language_service.record_layout_usage(hkl);
@@ -461,10 +459,6 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
 
     // Input methods can be added or removed while the utility is running.
     state.language_service.refresh_layouts();
-    let settings_store = state.settings;
-    state
-        .language_service
-        .sync_label_overrides(|language_id| settings_store.bubble_label(language_id));
 
     // Set display mode for this key binding
     state.bubble.display_mode = binding.display_mode;
@@ -540,10 +534,6 @@ fn on_tray_right_click(hwnd: HWND) {
 
 fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
     match cmd {
-        tray::TrayCommand::EditLanguage(primary_lang_id) => {
-            handle_language_label_edit(hwnd, primary_lang_id);
-            return;
-        }
         tray::TrayCommand::PickCustomBackground => {
             let initial = with_app(|state| state.custom_colors.bg_color).unwrap_or(0);
             if let Some(new_color) = pick_color(hwnd, initial) {
@@ -670,103 +660,7 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
         tray::TrayCommand::PickCustomBackground | tray::TrayCommand::PickCustomForeground => {
             unreachable!()
         }
-        tray::TrayCommand::EditLanguage(_) => unreachable!(),
     });
-}
-
-fn handle_language_label_edit(hwnd: HWND, primary_lang_id: u16) {
-    let language = with_app(|state| {
-        state
-            .language_service
-            .layouts()
-            .iter()
-            .find(|layout| layout.primary_lang_id == primary_lang_id)
-            .map(|layout| {
-                (
-                    layout.english_name.clone(),
-                    layout.iso_code.clone(),
-                    layout.bubble_text.clone(),
-                )
-            })
-    })
-    .flatten();
-    let Some((language_name, iso_code, current_label)) = language else {
-        return;
-    };
-
-    let edit_result = label_dialog::show(hwnd, &language_name, &iso_code, &current_label);
-    let Some(settings_store) = with_app(|state| state.settings) else {
-        return;
-    };
-    let persistence_result = persist_label_edit(
-        primary_lang_id,
-        edit_result,
-        |language_id, label| settings_store.save_bubble_label(language_id, label),
-        |language_id| settings_store.reset_bubble_label(language_id),
-    );
-
-    match persistence_result {
-        Ok(Some(update)) => {
-            with_app(|state| {
-                let runtime_label = match update {
-                    RuntimeLabelUpdate::Set(label) => Some(label),
-                    RuntimeLabelUpdate::Reset => None,
-                };
-                state
-                    .language_service
-                    .set_label_override(primary_lang_id, runtime_label);
-                let label = state
-                    .language_service
-                    .layouts()
-                    .iter()
-                    .find(|layout| layout.primary_lang_id == primary_lang_id)
-                    .map(|layout| layout.bubble_text.clone());
-                if let Some(label) = label {
-                    state.bubble.update_language_label(primary_lang_id, &label);
-                }
-            });
-        }
-        Ok(None) => {}
-        Err(error) => show_label_save_error(hwnd, &error),
-    }
-}
-
-#[derive(Debug, PartialEq, Eq)]
-enum RuntimeLabelUpdate {
-    Set(String),
-    Reset,
-}
-
-fn persist_label_edit<E>(
-    primary_lang_id: u16,
-    edit_result: label_dialog::LabelEditResult,
-    save: impl FnOnce(u16, &str) -> std::result::Result<(), E>,
-    reset: impl FnOnce(u16) -> std::result::Result<(), E>,
-) -> std::result::Result<Option<RuntimeLabelUpdate>, E> {
-    match edit_result {
-        label_dialog::LabelEditResult::Save(label) => {
-            save(primary_lang_id, &label)?;
-            Ok(Some(RuntimeLabelUpdate::Set(label)))
-        }
-        label_dialog::LabelEditResult::Reset => {
-            reset(primary_lang_id)?;
-            Ok(Some(RuntimeLabelUpdate::Reset))
-        }
-        label_dialog::LabelEditResult::Cancel => Ok(None),
-    }
-}
-
-fn show_label_save_error(hwnd: HWND, error: &windows::core::Error) {
-    let message = format!("Language Bubble could not save this label.\n\n{error}");
-    let wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
-    unsafe {
-        let _ = MessageBoxW(
-            Some(hwnd),
-            PCWSTR(wide.as_ptr()),
-            w!("Language Bubble"),
-            MB_OK | MB_ICONERROR,
-        );
-    }
 }
 
 fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
@@ -792,58 +686,7 @@ fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use std::cell::Cell;
-
     use super::*;
-
-    #[test]
-    fn label_edit_save_reset_and_cancel_have_distinct_persistence_actions() {
-        let saved = Cell::new(false);
-        let result = persist_label_edit(
-            0x0009,
-            label_dialog::LabelEditResult::Save("E".to_string()),
-            |language_id, label| {
-                assert_eq!(language_id, 0x0009);
-                assert_eq!(label, "E");
-                saved.set(true);
-                Ok::<(), ()>(())
-            },
-            |_| panic!("reset should not run while saving"),
-        );
-        assert!(saved.get());
-        assert_eq!(result, Ok(Some(RuntimeLabelUpdate::Set("E".to_string()))));
-
-        let result = persist_label_edit(
-            0x0009,
-            label_dialog::LabelEditResult::Reset,
-            |_, _| panic!("save should not run while resetting"),
-            |language_id| {
-                assert_eq!(language_id, 0x0009);
-                Ok::<(), ()>(())
-            },
-        );
-        assert_eq!(result, Ok(Some(RuntimeLabelUpdate::Reset)));
-
-        let result = persist_label_edit(
-            0x0009,
-            label_dialog::LabelEditResult::Cancel,
-            |_, _| panic!("save should not run after cancellation"),
-            |_| panic!("reset should not run after cancellation"),
-        );
-        assert_eq!(result, Ok::<_, ()>(None));
-    }
-
-    #[test]
-    fn failed_label_persistence_does_not_produce_a_runtime_update() {
-        let result = persist_label_edit(
-            0x0019,
-            label_dialog::LabelEditResult::Save("R".to_string()),
-            |_, _| Err("registry unavailable"),
-            |_| Ok(()),
-        );
-
-        assert_eq!(result, Err("registry unavailable"));
-    }
 
     #[test]
     fn system_theme_change_compares_setting_contents() {

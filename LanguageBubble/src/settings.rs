@@ -138,20 +138,6 @@ impl<B: SettingsBackend> SettingsStore<B> {
         self.backend.write_string("Size", size.as_str())
     }
 
-    pub fn bubble_label(&self, primary_lang_id: u16) -> Option<String> {
-        self.read_string(&bubble_label_value_name(primary_lang_id))
-    }
-
-    pub fn save_bubble_label(&self, primary_lang_id: u16, label: &str) -> Result<()> {
-        self.backend
-            .write_string(&bubble_label_value_name(primary_lang_id), label)
-    }
-
-    pub fn reset_bubble_label(&self, primary_lang_id: u16) -> Result<()> {
-        self.backend
-            .delete_value(&bubble_label_value_name(primary_lang_id))
-    }
-
     pub fn hide_on_typing(&self) -> bool {
         self.read_string("HideOnTyping").as_deref() == Some("True")
     }
@@ -383,10 +369,6 @@ fn wide_string(value: &str) -> Vec<u16> {
     value.encode_utf16().chain(std::iter::once(0)).collect()
 }
 
-pub fn bubble_label_value_name(primary_lang_id: u16) -> String {
-    format!("BubbleLabel.{:03X}", primary_lang_id & 0x03FF)
-}
-
 const fn bool_string(value: bool) -> &'static str {
     if value { "True" } else { "False" }
 }
@@ -595,36 +577,6 @@ mod tests {
         let store = SettingsStore::new(backend);
         assert_eq!(store.bubble_size(), BubbleSize::Medium);
         assert!(store.save_bubble_size(BubbleSize::Large).is_err());
-    }
-
-    #[test]
-    fn bubble_labels_use_primary_language_registry_names() {
-        let backend = MemoryBackend::default();
-        let store = SettingsStore::new(backend.clone());
-
-        store.save_bubble_label(0x0009, "E").unwrap();
-        assert_eq!(store.bubble_label(0x0009).as_deref(), Some("E"));
-        assert_eq!(backend.value("BubbleLabel.009").as_deref(), Some("E"));
-
-        store.reset_bubble_label(0x0009).unwrap();
-        assert_eq!(store.bubble_label(0x0009), None);
-    }
-
-    #[test]
-    fn bubble_label_registry_names_are_stable_and_language_scoped() {
-        assert_eq!(bubble_label_value_name(0x0009), "BubbleLabel.009");
-        assert_eq!(bubble_label_value_name(0x0019), "BubbleLabel.019");
-        assert_eq!(bubble_label_value_name(0xFFFF), "BubbleLabel.3FF");
-    }
-
-    #[test]
-    fn bubble_label_write_failures_are_reportable() {
-        let backend = MemoryBackend::default();
-        backend.fail_writes.set(true);
-        let store = SettingsStore::new(backend);
-
-        assert!(store.save_bubble_label(0x0009, "E").is_err());
-        assert!(store.reset_bubble_label(0x0009).is_err());
     }
 
     #[test]

@@ -66,7 +66,6 @@ pub struct BubbleWindow {
     render_target: Option<ID2D1HwndRenderTarget>,
     text_format: Option<IDWriteTextFormat>,
     text_layouts: Vec<Option<IDWriteTextLayout>>,
-    label_language_ids: Vec<u16>,
     pub anim: AnimController,
     pub size: BubbleSize,
     pub display_mode: DisplayMode,
@@ -97,7 +96,6 @@ impl BubbleWindow {
             render_target: None,
             text_format: None,
             text_layouts: Vec::new(),
-            label_language_ids: Vec::new(),
             anim: AnimController::new(),
             size: BubbleSize::Medium,
             display_mode: DisplayMode::Carousel,
@@ -252,10 +250,6 @@ impl BubbleWindow {
     ) {
         self.stop_show_timers();
         self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
-        self.label_language_ids = layouts
-            .iter()
-            .map(|layout| layout.primary_lang_id)
-            .collect();
         self.rebuild_text_layouts();
         let monitor = self.destination_monitor(caret);
         let dpi_scale = self.monitor_dpi_scale(monitor);
@@ -289,21 +283,6 @@ impl BubbleWindow {
         self.render();
         self.previous_selected_index = selected;
         self.start_show_timers();
-    }
-
-    pub fn update_language_label(&mut self, primary_lang_id: u16, label: &str) {
-        let mut changed = false;
-        for (index, language_id) in self.label_language_ids.iter().enumerate() {
-            if *language_id == primary_lang_id && self.labels[index] != label {
-                self.labels[index] = label.to_string();
-                changed = true;
-            }
-        }
-
-        if changed {
-            self.rebuild_text_layouts();
-            self.render();
-        }
     }
 
     fn stop_show_timers(&self) {
