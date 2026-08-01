@@ -1,6 +1,7 @@
-use windows::core::{w, PCWSTR};
 use windows::ApplicationModel::{Package, StartupTask, StartupTaskState};
+use windows::Win32::Foundation::ERROR_FILE_NOT_FOUND;
 use windows::Win32::System::Registry::*;
+use windows::core::{PCWSTR, Result, w};
 
 use crate::types::*;
 
@@ -13,12 +14,14 @@ pub fn is_msix_packaged() -> bool {
     Package::Current().is_ok()
 }
 
-fn read_string(key_name: PCWSTR) -> Option<String> {
+fn try_read_string(key_name: PCWSTR) -> Result<Option<String>> {
     unsafe {
         let mut hkey = HKEY::default();
-        if RegOpenKeyExW(HKEY_CURRENT_USER, SUBKEY, Some(0), KEY_READ, &mut hkey).is_err() {
-            return None;
+        let open_result = RegOpenKeyExW(HKEY_CURRENT_USER, SUBKEY, Some(0), KEY_READ, &mut hkey);
+        if open_result == ERROR_FILE_NOT_FOUND {
+            return Ok(None);
         }
+        open_result.ok()?;
         let mut buf = [0u16; 256];
         let mut size = (buf.len() * 2) as u32;
         let mut kind = REG_VALUE_TYPE::default();
@@ -31,29 +34,29 @@ fn read_string(key_name: PCWSTR) -> Option<String> {
             Some(&mut size),
         );
         let _ = RegCloseKey(hkey);
-        if result.is_ok() && kind == REG_SZ {
+        if result == ERROR_FILE_NOT_FOUND {
+            Ok(None)
+        } else if result.is_ok() && kind == REG_SZ {
             let len = (size as usize / 2).saturating_sub(1);
-            Some(String::from_utf16_lossy(&buf[..len]))
+            Ok(Some(String::from_utf16_lossy(&buf[..len])))
+        } else if result.is_ok() {
+            Ok(None)
         } else {
-            None
+            Err(result.into())
         }
     }
 }
 
-fn write_string(key_name: PCWSTR, value: &str) {
+fn read_string(key_name: PCWSTR) -> Option<String> {
+    try_read_string(key_name).ok().flatten()
+}
+
+fn try_write_string(key_name: PCWSTR, value: &str) -> Result<()> {
     unsafe {
         let mut hkey = HKEY::default();
-        if RegCreateKeyW(
-            HKEY_CURRENT_USER,
-            SUBKEY,
-            &mut hkey,
-        )
-        .is_err()
-        {
-            return;
-        }
+        RegCreateKeyW(HKEY_CURRENT_USER, SUBKEY, &mut hkey).ok()?;
         let wide: Vec<u16> = value.encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = RegSetValueExW(
+        let result = RegSetValueExW(
             hkey,
             key_name,
             Some(0),
@@ -64,7 +67,52 @@ fn write_string(key_name: PCWSTR, value: &str) {
             )),
         );
         let _ = RegCloseKey(hkey);
+        result.ok()
     }
+}
+
+fn write_string(key_name: PCWSTR, value: &str) {
+    let _ = try_write_string(key_name, value);
+}
+
+fn try_delete_value(key_name: PCWSTR) -> Result<()> {
+    unsafe {
+        let mut hkey = HKEY::default();
+        let open_result = RegOpenKeyExW(HKEY_CURRENT_USER, SUBKEY, Some(0), KEY_WRITE, &mut hkey);
+        if open_result == ERROR_FILE_NOT_FOUND {
+            return Ok(());
+        }
+        open_result.ok()?;
+        let result = RegDeleteValueW(hkey, key_name);
+        let _ = RegCloseKey(hkey);
+        if result.is_ok() || result == ERROR_FILE_NOT_FOUND {
+            Ok(())
+        } else {
+            Err(result.into())
+        }
+    }
+}
+
+pub fn bubble_label_value_name(primary_lang_id: u16) -> String {
+    format!("BubbleLabel.{:03X}", primary_lang_id & 0x03FF)
+}
+
+pub fn get_bubble_label(primary_lang_id: u16) -> Result<Option<String>> {
+    let name = bubble_label_value_name(primary_lang_id);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    try_read_string(PCWSTR(wide.as_ptr()))
+}
+
+pub fn save_bubble_label(primary_lang_id: u16, label: &str) -> Result<()> {
+    let name = bubble_label_value_name(primary_lang_id);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    try_write_string(PCWSTR(wide.as_ptr()), label)
+}
+
+pub fn reset_bubble_label(primary_lang_id: u16) -> Result<()> {
+    let name = bubble_label_value_name(primary_lang_id);
+    let wide: Vec<u16> = name.encode_utf16().chain(std::iter::once(0)).collect();
+    try_delete_value(PCWSTR(wide.as_ptr()))
 }
 
 pub fn get_key_mode(key_name: &str, default: SwitchMode) -> SwitchMode {
@@ -151,8 +199,14 @@ pub fn get_custom_theme_colors() -> CustomThemeColors {
 }
 
 pub fn save_custom_theme_colors(colors: &CustomThemeColors) {
-    write_string(w!("CustomBG"), &format!("{:06X}", colors.bg_color & 0x00FFFFFF));
-    write_string(w!("CustomFG"), &format!("{:06X}", colors.fg_color & 0x00FFFFFF));
+    write_string(
+        w!("CustomBG"),
+        &format!("{:06X}", colors.bg_color & 0x00FFFFFF),
+    );
+    write_string(
+        w!("CustomFG"),
+        &format!("{:06X}", colors.fg_color & 0x00FFFFFF),
+    );
     write_string(w!("CustomOpacity"), &colors.opacity.to_string());
 }
 
@@ -250,7 +304,10 @@ pub fn get_check_for_updates() -> bool {
 }
 
 pub fn save_check_for_updates(enabled: bool) {
-    write_string(w!("CheckForUpdates"), if enabled { "True" } else { "False" });
+    write_string(
+        w!("CheckForUpdates"),
+        if enabled { "True" } else { "False" },
+    );
 }
 
 pub fn get_last_update_check() -> u64 {
@@ -305,4 +362,16 @@ pub fn migrate_display_mode_settings() {
     write_string(w!("CapsLockDisplayMode"), mode.as_str());
     write_string(w!("WinSpaceDisplayMode"), mode.as_str());
     write_string(w!("AltShiftDisplayMode"), mode.as_str());
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bubble_label_registry_names_are_stable_and_language_scoped() {
+        assert_eq!(bubble_label_value_name(0x0009), "BubbleLabel.009");
+        assert_eq!(bubble_label_value_name(0x0019), "BubbleLabel.019");
+        assert_eq!(bubble_label_value_name(0xFFFF), "BubbleLabel.3FF");
+    }
 }

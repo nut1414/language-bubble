@@ -1,10 +1,11 @@
+use std::collections::HashSet;
 use std::mem;
 
-use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::Shell::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
 
 const TRAY_ICON_ID: u32 = 1;
 pub const WM_TRAY_CALLBACK: u32 = WM_USER + 1;
@@ -33,6 +34,13 @@ pub const CMD_CUSTOM_FG_COLOR: u16 = 1411;
 pub const CMD_OPACITY_BASE: u16 = 1420;
 pub const CMD_CHECK_UPDATES_TOGGLE: u16 = 1503;
 pub const CMD_DOWNLOAD_UPDATE: u16 = 1504;
+const CMD_LANGUAGE_LABEL_BASE: u16 = 1600;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrayAction {
+    Command(u16),
+    EditLanguage(u16),
+}
 
 pub struct TrayIcon {
     hwnd: HWND,
@@ -148,7 +156,7 @@ pub struct ContextMenuParams<'a> {
     pub is_msix: bool,
 }
 
-pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
+pub fn show_context_menu(p: ContextMenuParams) -> Option<TrayAction> {
     let ContextMenuParams {
         hwnd,
         layouts,
@@ -170,6 +178,7 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
         app_version,
         is_msix,
     } = p;
+    let language_items = unique_languages(layouts);
     unsafe {
         let menu = CreatePopupMenu().ok()?;
 
@@ -189,11 +198,47 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
             let _ = AppendMenuW(menu, flags, 0, PCWSTR(wide.as_ptr()));
         }
 
+        let label_menu = CreatePopupMenu().ok()?;
+        for (index, layout) in language_items.iter().enumerate() {
+            let Some(command_id) = language_command_id(index) else {
+                break;
+            };
+            let text = format!("{} - {}", layout.bubble_text, layout.english_name);
+            let wide: Vec<u16> = text.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(
+                label_menu,
+                MF_STRING,
+                command_id as usize,
+                PCWSTR(wide.as_ptr()),
+            );
+        }
+        let label_menu_flags = if language_items.is_empty() {
+            MF_POPUP | MF_GRAYED
+        } else {
+            MF_POPUP
+        };
+        let _ = AppendMenuW(
+            menu,
+            label_menu_flags,
+            label_menu.0 as usize,
+            w!("Language Labels"),
+        );
+
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
         // Start with Windows
-        let sww_flags = MF_STRING | if start_with_windows { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, sww_flags, CMD_START_WITH_WINDOWS as usize, w!("Start with Windows"));
+        let sww_flags = MF_STRING
+            | if start_with_windows {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let _ = AppendMenuW(
+            menu,
+            sww_flags,
+            CMD_START_WITH_WINDOWS as usize,
+            w!("Start with Windows"),
+        );
 
         // Size submenu
         let size_menu = CreatePopupMenu().ok()?;
@@ -207,7 +252,12 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
         for (i, (label, s)) in sizes.iter().enumerate() {
             let flags = MF_STRING | if *s == size { MF_CHECKED } else { MF_UNCHECKED };
             let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(size_menu, flags, (CMD_SIZE_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(
+                size_menu,
+                flags,
+                (CMD_SIZE_BASE + i as u16) as usize,
+                PCWSTR(wide.as_ptr()),
+            );
         }
         let _ = AppendMenuW(menu, MF_POPUP, size_menu.0 as usize, w!("Size"));
 
@@ -219,9 +269,19 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
             ("Custom", crate::types::ThemeMode::Custom),
         ];
         for (i, (label, t)) in themes.iter().enumerate() {
-            let flags = MF_STRING | if *t == theme_mode { MF_CHECKED } else { MF_UNCHECKED };
+            let flags = MF_STRING
+                | if *t == theme_mode {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                };
             let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(theme_menu, flags, (CMD_THEME_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(
+                theme_menu,
+                flags,
+                (CMD_THEME_BASE + i as u16) as usize,
+                PCWSTR(wide.as_ptr()),
+            );
         }
 
         let _ = AppendMenuW(theme_menu, MF_SEPARATOR, 0, None);
@@ -230,11 +290,21 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
 
         let bg_label = "Background Color...";
         let bg_wide: Vec<u16> = bg_label.encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = AppendMenuW(customize_menu, MF_STRING, CMD_CUSTOM_BG_COLOR as usize, PCWSTR(bg_wide.as_ptr()));
+        let _ = AppendMenuW(
+            customize_menu,
+            MF_STRING,
+            CMD_CUSTOM_BG_COLOR as usize,
+            PCWSTR(bg_wide.as_ptr()),
+        );
 
         let fg_label = "Text Color...";
         let fg_wide: Vec<u16> = fg_label.encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = AppendMenuW(customize_menu, MF_STRING, CMD_CUSTOM_FG_COLOR as usize, PCWSTR(fg_wide.as_ptr()));
+        let _ = AppendMenuW(
+            customize_menu,
+            MF_STRING,
+            CMD_CUSTOM_FG_COLOR as usize,
+            PCWSTR(fg_wide.as_ptr()),
+        );
 
         let _ = AppendMenuW(customize_menu, MF_SEPARATOR, 0, None);
 
@@ -242,58 +312,146 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
         let opacity_labels = ["25%", "50%", "75%", "85%", "90%", "95%", "100%"];
         let opacity_values = crate::types::OPACITY_VALUES;
         for (i, label) in opacity_labels.iter().enumerate() {
-            let flags = MF_STRING | if opacity_values[i] == custom_colors.opacity { MF_CHECKED } else { MF_UNCHECKED };
+            let flags = MF_STRING
+                | if opacity_values[i] == custom_colors.opacity {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                };
             let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(opacity_menu, flags, (CMD_OPACITY_BASE + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(
+                opacity_menu,
+                flags,
+                (CMD_OPACITY_BASE + i as u16) as usize,
+                PCWSTR(wide.as_ptr()),
+            );
         }
         let opacity_wide: Vec<u16> = "Opacity".encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = AppendMenuW(customize_menu, MF_POPUP, opacity_menu.0 as usize, PCWSTR(opacity_wide.as_ptr()));
+        let _ = AppendMenuW(
+            customize_menu,
+            MF_POPUP,
+            opacity_menu.0 as usize,
+            PCWSTR(opacity_wide.as_ptr()),
+        );
 
         let customize_flags = if theme_mode == crate::types::ThemeMode::Custom {
             MF_POPUP
         } else {
             MF_POPUP | MF_GRAYED
         };
-        let customize_label: Vec<u16> = "Customize...".encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = AppendMenuW(theme_menu, customize_flags, customize_menu.0 as usize, PCWSTR(customize_label.as_ptr()));
+        let customize_label: Vec<u16> = "Customize..."
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = AppendMenuW(
+            theme_menu,
+            customize_flags,
+            customize_menu.0 as usize,
+            PCWSTR(customize_label.as_ptr()),
+        );
 
         let _ = AppendMenuW(menu, MF_POPUP, theme_menu.0 as usize, w!("Theme"));
 
         // Key Bindings submenu (now includes display mode per key)
         let key_menu = CreatePopupMenu().ok()?;
-        add_key_submenu(key_menu, "CapsLock", CMD_KEY_CAPSLOCK_BASE, caps_lock_mode, CMD_KEY_CAPSLOCK_DISPLAY_BASE, caps_lock_display);
-        add_key_submenu(key_menu, "Win + Space", CMD_KEY_WINSPACE_BASE, win_space_mode, CMD_KEY_WINSPACE_DISPLAY_BASE, win_space_display);
-        add_key_submenu(key_menu, "Alt + Shift", CMD_KEY_ALTSHIFT_BASE, alt_shift_mode, CMD_KEY_ALTSHIFT_DISPLAY_BASE, alt_shift_display);
+        add_key_submenu(
+            key_menu,
+            "CapsLock",
+            CMD_KEY_CAPSLOCK_BASE,
+            caps_lock_mode,
+            CMD_KEY_CAPSLOCK_DISPLAY_BASE,
+            caps_lock_display,
+        );
+        add_key_submenu(
+            key_menu,
+            "Win + Space",
+            CMD_KEY_WINSPACE_BASE,
+            win_space_mode,
+            CMD_KEY_WINSPACE_DISPLAY_BASE,
+            win_space_display,
+        );
+        add_key_submenu(
+            key_menu,
+            "Alt + Shift",
+            CMD_KEY_ALTSHIFT_BASE,
+            alt_shift_mode,
+            CMD_KEY_ALTSHIFT_DISPLAY_BASE,
+            alt_shift_display,
+        );
         let _ = AppendMenuW(menu, MF_POPUP, key_menu.0 as usize, w!("Key Bindings"));
 
         // Hide on typing
-        let hot_flags = MF_STRING | if hide_on_typing { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, hot_flags, CMD_HIDE_ON_TYPING as usize, w!("Hide on Typing"));
+        let hot_flags = MF_STRING
+            | if hide_on_typing {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let _ = AppendMenuW(
+            menu,
+            hot_flags,
+            CMD_HIDE_ON_TYPING as usize,
+            w!("Hide on Typing"),
+        );
 
         // Show Only Recent Languages (for Expanded mode)
-        let mru_flags = MF_STRING | if expanded_mru_only { MF_CHECKED } else { MF_UNCHECKED };
-        let _ = AppendMenuW(menu, mru_flags, CMD_EXPANDED_MRU_ONLY as usize, w!("Show Only Recent Languages"));
+        let mru_flags = MF_STRING
+            | if expanded_mru_only {
+                MF_CHECKED
+            } else {
+                MF_UNCHECKED
+            };
+        let _ = AppendMenuW(
+            menu,
+            mru_flags,
+            CMD_EXPANDED_MRU_ONLY as usize,
+            w!("Show Only Recent Languages"),
+        );
 
         // Advanced submenu
         let advanced_menu = CreatePopupMenu().ok()?;
         let version_label = format!("Version {}", app_version);
-        let version_wide: Vec<u16> = version_label.encode_utf16().chain(std::iter::once(0)).collect();
-        let _ = AppendMenuW(advanced_menu, MF_STRING | MF_DISABLED | MF_GRAYED, 0, PCWSTR(version_wide.as_ptr()));
+        let version_wide: Vec<u16> = version_label
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
+        let _ = AppendMenuW(
+            advanced_menu,
+            MF_STRING | MF_DISABLED | MF_GRAYED,
+            0,
+            PCWSTR(version_wide.as_ptr()),
+        );
 
         if !is_msix {
             let _ = AppendMenuW(advanced_menu, MF_SEPARATOR, 0, None);
             let check_label = "Check for updates";
-            let check_wide: Vec<u16> = check_label.encode_utf16().chain(std::iter::once(0)).collect();
-            let check_flags = MF_STRING | if check_for_updates { MF_CHECKED } else { MF_UNCHECKED };
-            let _ = AppendMenuW(advanced_menu, check_flags, CMD_CHECK_UPDATES_TOGGLE as usize, PCWSTR(check_wide.as_ptr()));
+            let check_wide: Vec<u16> = check_label
+                .encode_utf16()
+                .chain(std::iter::once(0))
+                .collect();
+            let check_flags = MF_STRING
+                | if check_for_updates {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                };
+            let _ = AppendMenuW(
+                advanced_menu,
+                check_flags,
+                CMD_CHECK_UPDATES_TOGGLE as usize,
+                PCWSTR(check_wide.as_ptr()),
+            );
         }
 
-        if !is_msix {
-            if let Some(pending) = pending_update {
-                let dl_label = format!("Download update... ({})", pending);
-                let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
-                let _ = AppendMenuW(advanced_menu, MF_STRING, CMD_DOWNLOAD_UPDATE as usize, PCWSTR(dl_wide.as_ptr()));
-            }
+        if !is_msix && let Some(pending) = pending_update {
+            let dl_label = format!("Download update... ({})", pending);
+            let dl_wide: Vec<u16> = dl_label.encode_utf16().chain(std::iter::once(0)).collect();
+            let _ = AppendMenuW(
+                advanced_menu,
+                MF_STRING,
+                CMD_DOWNLOAD_UPDATE as usize,
+                PCWSTR(dl_wide.as_ptr()),
+            );
         }
 
         let _ = AppendMenuW(menu, MF_POPUP, advanced_menu.0 as usize, w!("Advanced"));
@@ -321,11 +479,38 @@ pub fn show_context_menu(p: ContextMenuParams) -> Option<u16> {
         let _ = DestroyMenu(menu);
 
         if cmd.0 != 0 {
-            Some(cmd.0 as u16)
+            let language_ids: Vec<u16> = language_items
+                .iter()
+                .map(|layout| layout.primary_lang_id)
+                .collect();
+            action_from_command(cmd.0 as u16, &language_ids)
         } else {
             None
         }
     }
+}
+
+fn unique_languages(layouts: &[crate::language::LayoutInfo]) -> Vec<&crate::language::LayoutInfo> {
+    let mut seen = HashSet::new();
+    layouts
+        .iter()
+        .filter(|layout| seen.insert(layout.primary_lang_id))
+        .collect()
+}
+
+fn language_command_id(index: usize) -> Option<u16> {
+    CMD_LANGUAGE_LABEL_BASE.checked_add(u16::try_from(index).ok()?)
+}
+
+fn action_from_command(command_id: u16, language_ids: &[u16]) -> Option<TrayAction> {
+    if command_id < CMD_LANGUAGE_LABEL_BASE {
+        return Some(TrayAction::Command(command_id));
+    }
+    let index = (command_id - CMD_LANGUAGE_LABEL_BASE) as usize;
+    language_ids
+        .get(index)
+        .copied()
+        .map(TrayAction::EditLanguage)
 }
 
 unsafe fn add_key_submenu(
@@ -344,9 +529,19 @@ unsafe fn add_key_submenu(
             ("Do Not Intercept", crate::types::SwitchMode::Unused),
         ];
         for (i, (ml, mv)) in switch_labels.iter().enumerate() {
-            let flags = MF_STRING | if *mv == current_switch { MF_CHECKED } else { MF_UNCHECKED };
+            let flags = MF_STRING
+                | if *mv == current_switch {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                };
             let wide: Vec<u16> = ml.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(sub, flags, (switch_base_cmd + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(
+                sub,
+                flags,
+                (switch_base_cmd + i as u16) as usize,
+                PCWSTR(wide.as_ptr()),
+            );
         }
 
         let _ = AppendMenuW(sub, MF_SEPARATOR, 0, None);
@@ -357,12 +552,51 @@ unsafe fn add_key_submenu(
             ("Show All Languages", crate::types::DisplayMode::Expanded),
         ];
         for (i, (ml, mv)) in display_labels.iter().enumerate() {
-            let flags = MF_STRING | if *mv == current_display { MF_CHECKED } else { MF_UNCHECKED };
+            let flags = MF_STRING
+                | if *mv == current_display {
+                    MF_CHECKED
+                } else {
+                    MF_UNCHECKED
+                };
             let wide: Vec<u16> = ml.encode_utf16().chain(std::iter::once(0)).collect();
-            let _ = AppendMenuW(sub, flags, (display_base_cmd + i as u16) as usize, PCWSTR(wide.as_ptr()));
+            let _ = AppendMenuW(
+                sub,
+                flags,
+                (display_base_cmd + i as u16) as usize,
+                PCWSTR(wide.as_ptr()),
+            );
         }
 
         let wide: Vec<u16> = label.encode_utf16().chain(std::iter::once(0)).collect();
         let _ = AppendMenuW(parent, MF_POPUP, sub.0 as usize, PCWSTR(wide.as_ptr()));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_commands_map_to_their_primary_language_ids() {
+        let language_ids = [0x0009, 0x0019, 0x0008];
+        assert_eq!(
+            action_from_command(1600, &language_ids),
+            Some(TrayAction::EditLanguage(0x0009))
+        );
+        assert_eq!(
+            action_from_command(1602, &language_ids),
+            Some(TrayAction::EditLanguage(0x0008))
+        );
+        assert_eq!(action_from_command(1603, &language_ids), None);
+    }
+
+    #[test]
+    fn existing_command_ids_stay_outside_the_language_range() {
+        assert_eq!(
+            action_from_command(CMD_EXIT, &[]),
+            Some(TrayAction::Command(CMD_EXIT))
+        );
+        assert_eq!(language_command_id(0), Some(CMD_LANGUAGE_LABEL_BASE));
+        assert_eq!(language_command_id(usize::MAX), None);
     }
 }

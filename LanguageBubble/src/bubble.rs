@@ -1,15 +1,15 @@
 use std::mem;
 
-use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::Graphics::Direct2D::Common::*;
 use windows::Win32::Graphics::Direct2D::*;
 use windows::Win32::Graphics::DirectWrite::*;
 use windows::Win32::Graphics::Dwm::DwmExtendFrameIntoClientArea;
-use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::Graphics::Gdi::*;
+use windows::Win32::UI::Controls::MARGINS;
 use windows::Win32::UI::HiDpi::*;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
 
 use crate::animation::*;
 use crate::caret::ScreenPoint;
@@ -60,6 +60,8 @@ pub struct BubbleWindow {
     dwrite_factory: IDWriteFactory,
     render_target: Option<ID2D1HwndRenderTarget>,
     text_format: Option<IDWriteTextFormat>,
+    text_layouts: Vec<Option<IDWriteTextLayout>>,
+    label_language_ids: Vec<u16>,
     pub anim: AnimController,
     pub size: BubbleSize,
     pub display_mode: DisplayMode,
@@ -75,12 +77,10 @@ pub struct BubbleWindow {
 
 impl BubbleWindow {
     pub fn new(msg_hwnd: HWND) -> windows::core::Result<Self> {
-        let d2d_factory: ID2D1Factory = unsafe {
-            D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)?
-        };
-        let dwrite_factory: IDWriteFactory = unsafe {
-            DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)?
-        };
+        let d2d_factory: ID2D1Factory =
+            unsafe { D2D1CreateFactory(D2D1_FACTORY_TYPE_SINGLE_THREADED, None)? };
+        let dwrite_factory: IDWriteFactory =
+            unsafe { DWriteCreateFactory(DWRITE_FACTORY_TYPE_SHARED)? };
 
         let hwnd = create_overlay_window();
 
@@ -91,6 +91,8 @@ impl BubbleWindow {
             dwrite_factory,
             render_target: None,
             text_format: None,
+            text_layouts: Vec::new(),
+            label_language_ids: Vec::new(),
             anim: AnimController::new(),
             size: BubbleSize::Medium,
             display_mode: DisplayMode::Carousel,
@@ -110,6 +112,7 @@ impl BubbleWindow {
     pub fn set_size(&mut self, size: BubbleSize) {
         self.size = size;
         self.create_text_format();
+        self.rebuild_text_layouts();
         self.render_target = None;
     }
 
@@ -144,8 +147,60 @@ impl BubbleWindow {
             if let Some(ref fmt) = self.text_format {
                 let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             }
         }
+    }
+
+    fn rebuild_text_layouts(&mut self) {
+        let layouts = self
+            .labels
+            .iter()
+            .map(|label| self.create_fitted_text_layout(label).ok())
+            .collect();
+        self.text_layouts = layouts;
+    }
+
+    fn create_fitted_text_layout(&self, label: &str) -> windows::core::Result<IDWriteTextLayout> {
+        let Some(text_format) = &self.text_format else {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        };
+        let size = self.size.metrics();
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        let layout = unsafe {
+            self.dwrite_factory.CreateTextLayout(
+                &wide,
+                text_format,
+                size.item_width * 8.0,
+                size.item_height,
+            )?
+        };
+
+        unsafe {
+            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            let mut text_metrics = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut text_metrics)?;
+            let scale = fitted_font_scale(
+                text_metrics.widthIncludingTrailingWhitespace,
+                size.item_width * 0.9,
+            );
+            if scale < 1.0 {
+                layout.SetFontSize(
+                    size.font_size * scale,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: 0,
+                        length: wide.len() as u32,
+                    },
+                )?;
+            }
+            layout.SetMaxWidth(size.item_width)?;
+            layout.SetMaxHeight(size.item_height)?;
+        }
+
+        Ok(layout)
     }
 
     fn ensure_render_target(&mut self) {
@@ -199,6 +254,11 @@ impl BubbleWindow {
 
         // Update labels
         self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
+        self.label_language_ids = layouts
+            .iter()
+            .map(|layout| layout.primary_lang_id)
+            .collect();
+        self.rebuild_text_layouts();
 
         let can_slide = self.previous_selected_index >= 0
             && self.previous_selected_index != selected
@@ -209,7 +269,10 @@ impl BubbleWindow {
         // so we capture what's actually on screen, not the new targets.
         if can_slide {
             let current_opacities: Vec<f32> = (0..self.labels.len())
-                .map(|i| self.anim.label_opacity(i, self.get_label_target_opacity(i as i32)))
+                .map(|i| {
+                    self.anim
+                        .label_opacity(i, self.get_label_target_opacity(i as i32))
+                })
                 .collect();
             self.anim.begin_label_transition(current_opacities);
         }
@@ -269,8 +332,12 @@ impl BubbleWindow {
             self.desired_phys_y = target_y;
             unsafe {
                 let _ = SetWindowPos(
-                    self.hwnd, Some(HWND_TOPMOST),
-                    start_x, target_y, 0, 0,
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    start_x,
+                    target_y,
+                    0,
+                    0,
                     SWP_NOSIZE | SWP_NOACTIVATE,
                 );
             }
@@ -319,6 +386,21 @@ impl BubbleWindow {
         }
     }
 
+    pub fn update_language_label(&mut self, primary_lang_id: u16, label: &str) {
+        let mut changed = false;
+        for (index, language_id) in self.label_language_ids.iter().enumerate() {
+            if *language_id == primary_lang_id && self.labels[index] != label {
+                self.labels[index] = label.to_string();
+                changed = true;
+            }
+        }
+
+        if changed {
+            self.rebuild_text_layouts();
+            self.render();
+        }
+    }
+
     pub fn instant_hide(&mut self) {
         unsafe {
             let _ = KillTimer(Some(self.msg_hwnd), TIMER_HIDE);
@@ -352,8 +434,12 @@ impl BubbleWindow {
             // Move window without overwriting the target in desired_phys_x
             unsafe {
                 let _ = SetWindowPos(
-                    self.hwnd, Some(HWND_TOPMOST),
-                    x, self.desired_phys_y, 0, 0,
+                    self.hwnd,
+                    Some(HWND_TOPMOST),
+                    x,
+                    self.desired_phys_y,
+                    0,
+                    0,
                     SWP_NOSIZE | SWP_NOACTIVATE,
                 );
             }
@@ -384,6 +470,7 @@ impl BubbleWindow {
         }
     }
 
+    #[allow(clippy::missing_transmute_annotations)]
     fn render(&mut self) {
         self.ensure_render_target();
         let Some(rt) = &self.render_target else {
@@ -421,9 +508,27 @@ impl BubbleWindow {
             }
             _ => {
                 if self.dark_mode {
-                    (DARK_BG, DARK_BORDER, D2D1_COLOR_F { r: 1.0, g: 1.0, b: 1.0, a: 1.0 })
+                    (
+                        DARK_BG,
+                        DARK_BORDER,
+                        D2D1_COLOR_F {
+                            r: 1.0,
+                            g: 1.0,
+                            b: 1.0,
+                            a: 1.0,
+                        },
+                    )
                 } else {
-                    (LIGHT_BG, LIGHT_BORDER, D2D1_COLOR_F { r: 0.0, g: 0.0, b: 0.0, a: 1.0 })
+                    (
+                        LIGHT_BG,
+                        LIGHT_BORDER,
+                        D2D1_COLOR_F {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: 1.0,
+                        },
+                    )
                 }
             }
         };
@@ -474,14 +579,14 @@ impl BubbleWindow {
             rt.DrawRoundedRectangle(&rrect, &border_brush, 0.5, None);
 
             // Draw labels
-            let slide_offset = if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1
-            {
-                self.anim.slide_offset()
-            } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
-                0.0 // All labels visible, no row offset
-            } else {
-                -(self.selected_index as f32 * metrics.item_width)
-            };
+            let slide_offset =
+                if self.display_mode == DisplayMode::Carousel && self.labels.len() > 1 {
+                    self.anim.slide_offset()
+                } else if self.display_mode == DisplayMode::Expanded && self.labels.len() > 1 {
+                    0.0 // All labels visible, no row offset
+                } else {
+                    -(self.selected_index as f32 * metrics.item_width)
+                };
 
             for (i, label_text) in self.labels.iter().enumerate() {
                 let label_opacity = self.get_label_opacity(i as i32);
@@ -501,8 +606,26 @@ impl BubbleWindow {
                     bottom: y + metrics.item_height,
                 };
 
-                let wide: Vec<u16> = label_text.encode_utf16().collect();
-                rt.DrawText(&wide, fmt, &rect, &fg_brush, D2D1_DRAW_TEXT_OPTIONS_NONE, DWRITE_MEASURING_MODE_NATURAL);
+                if let Some(Some(text_layout)) = self.text_layouts.get(i) {
+                    rt.DrawTextLayout(
+                        // Direct2D's point type is the C-compatible pair of f32s
+                        // supplied transitively by the windows crate.
+                        mem::transmute([x, y]),
+                        text_layout,
+                        &fg_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                    );
+                } else {
+                    let wide: Vec<u16> = label_text.encode_utf16().collect();
+                    rt.DrawText(
+                        &wide,
+                        fmt,
+                        &rect,
+                        &fg_brush,
+                        D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        DWRITE_MEASURING_MODE_NATURAL,
+                    );
+                }
             }
 
             let _ = rt.EndDraw(None, None);
@@ -515,9 +638,17 @@ impl BubbleWindow {
             return 1.0;
         }
         if self.display_mode == DisplayMode::Simple {
-            return if index == self.selected_index { 1.0 } else { 0.0 };
+            return if index == self.selected_index {
+                1.0
+            } else {
+                0.0
+            };
         }
-        if index == self.selected_index { 1.0 } else { 0.3 }
+        if index == self.selected_index {
+            1.0
+        } else {
+            0.3
+        }
     }
 
     /// Get the current animated opacity for a label.
@@ -536,9 +667,7 @@ impl BubbleWindow {
 
     fn position_at_caret(&mut self, phys_pt: ScreenPoint) {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
 
             let dpi_scale = self.get_dpi_scale();
             let margin = (10.0 * dpi_scale) as i32;
@@ -583,9 +712,7 @@ impl BubbleWindow {
 
     fn position_at_caret_expanded(&mut self, phys_pt: ScreenPoint, selected: i32) {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
 
             let dpi_scale = self.get_dpi_scale();
             let margin = (10.0 * dpi_scale) as i32;
@@ -636,9 +763,7 @@ impl BubbleWindow {
     /// Compute the target X position for expanded mode without moving the window.
     fn compute_expanded_x(&self, phys_pt: ScreenPoint, selected: i32, _win_w: i32) -> i32 {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
 
             let dpi_scale = self.get_dpi_scale();
             let margin = (10.0 * dpi_scale) as i32;
@@ -655,7 +780,10 @@ impl BubbleWindow {
             let mut x = phys_pt.x - selected_center_phys;
 
             // Clamp to monitor
-            let pt = POINT { x: phys_pt.x, y: phys_pt.y };
+            let pt = POINT {
+                x: phys_pt.x,
+                y: phys_pt.y,
+            };
             let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
@@ -676,9 +804,7 @@ impl BubbleWindow {
     /// Compute the target Y position for caret-relative placement.
     fn compute_caret_y(&self, phys_pt: ScreenPoint, _win_w: i32, _win_h: i32) -> i32 {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
 
             let dpi_scale = self.get_dpi_scale();
             let margin = (10.0 * dpi_scale) as i32;
@@ -690,7 +816,10 @@ impl BubbleWindow {
 
             let mut y = phys_pt.y + caret_offset;
 
-            let pt = POINT { x: phys_pt.x, y: phys_pt.y };
+            let pt = POINT {
+                x: phys_pt.x,
+                y: phys_pt.y,
+            };
             let hmon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
             let mut mi = MONITORINFO {
                 cbSize: mem::size_of::<MONITORINFO>() as u32,
@@ -710,9 +839,7 @@ impl BubbleWindow {
 
     fn center_on_screen(&mut self) {
         unsafe {
-            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-                DPI_AWARENESS_CONTEXT_PMV2 as _,
-            ));
+            SetThreadDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
 
             let mut rect = RECT::default();
             GetWindowRect(self.hwnd, &mut rect).ok();
@@ -760,10 +887,18 @@ impl BubbleWindow {
     }
 }
 
+fn fitted_font_scale(natural_width: f32, available_width: f32) -> f32 {
+    if natural_width <= 0.0 || natural_width <= available_width {
+        1.0
+    } else {
+        (available_width / natural_width).clamp(0.1, 1.0)
+    }
+}
+
 fn create_overlay_window() -> HWND {
     unsafe {
-        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .unwrap_or_default();
+        let hinstance =
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
         let wc = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             style: CS_HREDRAW | CS_VREDRAW,
@@ -845,10 +980,19 @@ fn is_dark_mode() -> bool {
             Some(&mut size),
         );
         let _ = RegCloseKey(hkey);
-        if result.is_ok() {
-            val == 0
-        } else {
-            true
-        }
+        if result.is_ok() { val == 0 } else { true }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_font_scaling_only_shrinks_overflowing_text() {
+        assert_eq!(fitted_font_scale(20.0, 27.0), 1.0);
+        assert_eq!(fitted_font_scale(0.0, 27.0), 1.0);
+        assert!((fitted_font_scale(54.0, 27.0) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(fitted_font_scale(1000.0, 27.0), 0.1);
     }
 }

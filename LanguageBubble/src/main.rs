@@ -5,6 +5,7 @@ mod bubble;
 mod capslock;
 mod caret;
 mod hook;
+mod label_dialog;
 mod language;
 mod settings;
 mod tray;
@@ -14,11 +15,11 @@ mod update;
 use std::cell::RefCell;
 use std::mem;
 
-use windows::core::*;
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::WindowsAndMessaging::*;
+use windows::core::*;
 
 use windows::Win32::UI::HiDpi::*;
 
@@ -68,9 +69,8 @@ fn main() {
     // Without this, Windows virtualizes coordinates at 96 DPI and
     // bitmap-stretches the window, causing blurriness at >100% scaling.
     unsafe {
-        let _ = SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT(
-            DPI_AWARENESS_CONTEXT_PMV2 as _,
-        ));
+        let _ =
+            SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT(DPI_AWARENESS_CONTEXT_PMV2 as _));
     }
 
     // COM initialization for UI Automation
@@ -99,9 +99,12 @@ fn main() {
     let caps_lock_mode = settings::get_key_mode("CapsLockMode", SwitchMode::AllLanguage);
     let win_space_mode = settings::get_key_mode("WinSpaceMode", SwitchMode::Unused);
     let alt_shift_mode = settings::get_key_mode("AltShiftMode", SwitchMode::Unused);
-    let caps_lock_display = settings::get_key_display_mode("CapsLockDisplayMode", DisplayMode::Carousel);
-    let win_space_display = settings::get_key_display_mode("WinSpaceDisplayMode", DisplayMode::Carousel);
-    let alt_shift_display = settings::get_key_display_mode("AltShiftDisplayMode", DisplayMode::Carousel);
+    let caps_lock_display =
+        settings::get_key_display_mode("CapsLockDisplayMode", DisplayMode::Carousel);
+    let win_space_display =
+        settings::get_key_display_mode("WinSpaceDisplayMode", DisplayMode::Carousel);
+    let alt_shift_display =
+        settings::get_key_display_mode("AltShiftDisplayMode", DisplayMode::Carousel);
     let hide_on_typing = settings::get_hide_on_typing();
     let expanded_mru_only = settings::get_expanded_mru_only();
     let theme_mode = settings::get_theme_mode();
@@ -115,13 +118,16 @@ fn main() {
 
     // Language service
     let mut language_service = language::LanguageService::new();
+    language_service
+        .sync_label_overrides(|language_id| settings::get_bubble_label(language_id).ok().flatten());
     if let Some(initial) = language_service.get_current_layout() {
         let hkl = initial.hkl;
         language_service.record_layout_usage(hkl);
     }
 
     // Bubble window
-    let mut bubble_win = bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
+    let mut bubble_win =
+        bubble::BubbleWindow::new(msg_hwnd).expect("Failed to create bubble window");
     bubble_win.set_size(settings::get_bubble_size());
     bubble_win.set_theme_mode(theme_mode);
     bubble_win.set_custom_colors(custom_colors);
@@ -134,9 +140,7 @@ fn main() {
     );
 
     // Check for updates (non-MSIX only)
-    if !settings::is_msix_packaged()
-        && settings::get_check_for_updates()
-    {
+    if !settings::is_msix_packaged() && settings::get_check_for_updates() {
         let last_check = settings::get_last_update_check();
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -191,13 +195,12 @@ fn main() {
     APP.with(|cell| {
         *cell.borrow_mut() = None;
     });
-
 }
 
 fn create_msg_window() -> HWND {
     unsafe {
-        let hinstance = windows::Win32::System::LibraryLoader::GetModuleHandleW(None)
-            .unwrap_or_default();
+        let hinstance =
+            windows::Win32::System::LibraryLoader::GetModuleHandleW(None).unwrap_or_default();
         let wc = WNDCLASSEXW {
             cbSize: mem::size_of::<WNDCLASSEXW>() as u32,
             lpfnWndProc: Some(msg_wnd_proc),
@@ -232,52 +235,54 @@ unsafe extern "system" fn msg_wnd_proc(
     lparam: LPARAM,
 ) -> LRESULT {
     unsafe {
-    match msg {
-        m if m == hook::WM_SWITCH_KEY => {
-            let combo = match wparam.0 {
-                0 => HookKeyCombo::CapsLock,
-                1 => HookKeyCombo::WinSpace,
-                2 => HookKeyCombo::AltShift,
-                _ => return LRESULT(0),
-            };
-            on_switch_key(combo);
-            LRESULT(0)
-        }
-        m if m == hook::WM_ANY_KEY => {
-            with_app(|state| {
-                if state.hide_on_typing {
-                    state.bubble.instant_hide();
-                }
-            });
-            LRESULT(0)
-        }
-        m if m == tray::WM_TRAY_CALLBACK => {
-            let mouse_msg = (lparam.0 & 0xFFFF) as u32;
-            if mouse_msg == WM_RBUTTONUP {
-                on_tray_right_click(hwnd);
+        match msg {
+            m if m == hook::WM_SWITCH_KEY => {
+                let combo = match wparam.0 {
+                    0 => HookKeyCombo::CapsLock,
+                    1 => HookKeyCombo::WinSpace,
+                    2 => HookKeyCombo::AltShift,
+                    _ => return LRESULT(0),
+                };
+                on_switch_key(combo);
+                LRESULT(0)
             }
-            LRESULT(0)
-        }
-        m if m == update::WM_UPDATE_AVAILABLE => {
-            let new_version = {
-                if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
-                    guard.take()
-                } else {
-                    None
-                }
-            };
-            if let Some(version) = new_version {
+            m if m == hook::WM_ANY_KEY => {
                 with_app(|state| {
-                    state.pending_update = Some(version.clone());
-                    state._tray.show_balloon("Language Bubble", &format!("Update available: {}", version));
+                    if state.hide_on_typing {
+                        state.bubble.instant_hide();
+                    }
                 });
+                LRESULT(0)
             }
-            LRESULT(0)
-        }
-        WM_TIMER => {
-            let timer_id = wparam.0;
-            with_app(|state| {
-                match timer_id {
+            m if m == tray::WM_TRAY_CALLBACK => {
+                let mouse_msg = (lparam.0 & 0xFFFF) as u32;
+                if mouse_msg == WM_RBUTTONUP {
+                    on_tray_right_click(hwnd);
+                }
+                LRESULT(0)
+            }
+            m if m == update::WM_UPDATE_AVAILABLE => {
+                let new_version = {
+                    if let Ok(mut guard) = update::PENDING_UPDATE.lock() {
+                        guard.take()
+                    } else {
+                        None
+                    }
+                };
+                if let Some(version) = new_version {
+                    with_app(|state| {
+                        state.pending_update = Some(version.clone());
+                        state._tray.show_balloon(
+                            "Language Bubble",
+                            &format!("Update available: {}", version),
+                        );
+                    });
+                }
+                LRESULT(0)
+            }
+            WM_TIMER => {
+                let timer_id = wparam.0;
+                with_app(|state| match timer_id {
                     bubble::TIMER_HIDE => {
                         let _ = KillTimer(Some(hwnd), bubble::TIMER_HIDE);
                         state.bubble.begin_hide();
@@ -289,27 +294,26 @@ unsafe extern "system" fn msg_wnd_proc(
                         state.bubble.tick();
                     }
                     _ => {}
-                }
-            });
-            LRESULT(0)
-        }
-        WM_SETTINGCHANGE => {
-            if lparam.0 != 0 {
-                let param = PCWSTR(lparam.0 as *const u16);
-                if param == w!("ImmersiveColorSet") {
-                    with_app(|state| {
-                        state.bubble.refresh_theme();
-                    });
-                }
+                });
+                LRESULT(0)
             }
-            LRESULT(0)
+            WM_SETTINGCHANGE => {
+                if lparam.0 != 0 {
+                    let param = PCWSTR(lparam.0 as *const u16);
+                    if param == w!("ImmersiveColorSet") {
+                        with_app(|state| {
+                            state.bubble.refresh_theme();
+                        });
+                    }
+                }
+                LRESULT(0)
+            }
+            WM_DESTROY => {
+                PostQuitMessage(0);
+                LRESULT(0)
+            }
+            _ => DefWindowProcW(hwnd, msg, wparam, lparam),
         }
-        WM_DESTROY => {
-            PostQuitMessage(0);
-            LRESULT(0)
-        }
-        _ => DefWindowProcW(hwnd, msg, wparam, lparam),
-    }
     }
 }
 
@@ -334,6 +338,12 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
         state.is_switching = false;
         return;
     }
+
+    // Input languages can be added or removed while the app is running.
+    state.language_service.refresh_layouts();
+    state
+        .language_service
+        .sync_label_overrides(|language_id| settings::get_bubble_label(language_id).ok().flatten());
 
     // Set display mode for this key binding
     state.bubble.display_mode = match combo {
@@ -399,6 +409,10 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
 
 fn on_tray_right_click(hwnd: HWND) {
     let data = with_app(|state| {
+        state.language_service.refresh_layouts();
+        state.language_service.sync_label_overrides(|language_id| {
+            settings::get_bubble_label(language_id).ok().flatten()
+        });
         (
             state.language_service.layouts().to_vec(),
             state.language_service.get_current_layout().map(|l| l.hkl),
@@ -418,14 +432,31 @@ fn on_tray_right_click(hwnd: HWND) {
         )
     });
 
-    let Some((layouts, current_hkl, start_with_windows, size, caps, winsp, altsh, caps_d, winsp_d, altsh_d, hot, emru, theme, cc, pending_update)) = data else {
+    let Some((
+        layouts,
+        current_hkl,
+        start_with_windows,
+        size,
+        caps,
+        winsp,
+        altsh,
+        caps_d,
+        winsp_d,
+        altsh_d,
+        hot,
+        emru,
+        theme,
+        cc,
+        pending_update,
+    )) = data
+    else {
         return;
     };
 
     let is_msix = settings::is_msix_packaged();
     let app_version = env!("CARGO_PKG_VERSION");
 
-    let Some(cmd) = tray::show_context_menu(tray::ContextMenuParams {
+    let Some(action) = tray::show_context_menu(tray::ContextMenuParams {
         hwnd,
         layouts: &layouts,
         current_hkl,
@@ -449,7 +480,104 @@ fn on_tray_right_click(hwnd: HWND) {
         return;
     };
 
-    handle_menu_command(hwnd, cmd);
+    match action {
+        tray::TrayAction::Command(command) => handle_menu_command(hwnd, command),
+        tray::TrayAction::EditLanguage(primary_lang_id) => {
+            handle_language_label_edit(hwnd, primary_lang_id)
+        }
+    }
+}
+
+fn handle_language_label_edit(hwnd: HWND, primary_lang_id: u16) {
+    let language = with_app(|state| {
+        state
+            .language_service
+            .layouts()
+            .iter()
+            .find(|layout| layout.primary_lang_id == primary_lang_id)
+            .map(|layout| {
+                (
+                    layout.english_name.clone(),
+                    layout.iso_code.clone(),
+                    layout.bubble_text.clone(),
+                )
+            })
+    })
+    .flatten();
+    let Some((language_name, iso_code, current_label)) = language else {
+        return;
+    };
+
+    let edit_result = label_dialog::show(hwnd, &language_name, &iso_code, &current_label);
+    let persistence_result = persist_label_edit(
+        primary_lang_id,
+        edit_result,
+        settings::save_bubble_label,
+        settings::reset_bubble_label,
+    );
+
+    match persistence_result {
+        Ok(Some(update)) => {
+            with_app(|state| {
+                let runtime_label = match update {
+                    RuntimeLabelUpdate::Set(label) => Some(label),
+                    RuntimeLabelUpdate::Reset => None,
+                };
+                state
+                    .language_service
+                    .set_label_override(primary_lang_id, runtime_label);
+                if let Some(label) = state
+                    .language_service
+                    .layouts()
+                    .iter()
+                    .find(|layout| layout.primary_lang_id == primary_lang_id)
+                    .map(|layout| layout.bubble_text.clone())
+                {
+                    state.bubble.update_language_label(primary_lang_id, &label);
+                }
+            });
+        }
+        Ok(None) => {}
+        Err(error) => show_label_save_error(hwnd, &error),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum RuntimeLabelUpdate {
+    Set(String),
+    Reset,
+}
+
+fn persist_label_edit<E>(
+    primary_lang_id: u16,
+    edit_result: label_dialog::LabelEditResult,
+    save: impl FnOnce(u16, &str) -> std::result::Result<(), E>,
+    reset: impl FnOnce(u16) -> std::result::Result<(), E>,
+) -> std::result::Result<Option<RuntimeLabelUpdate>, E> {
+    match edit_result {
+        label_dialog::LabelEditResult::Save(label) => {
+            save(primary_lang_id, &label)?;
+            Ok(Some(RuntimeLabelUpdate::Set(label)))
+        }
+        label_dialog::LabelEditResult::Reset => {
+            reset(primary_lang_id)?;
+            Ok(Some(RuntimeLabelUpdate::Reset))
+        }
+        label_dialog::LabelEditResult::Cancel => Ok(None),
+    }
+}
+
+fn show_label_save_error(hwnd: HWND, error: &windows::core::Error) {
+    let message = format!("Language Bubble could not save this label.\n\n{error}");
+    let wide: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        let _ = MessageBoxW(
+            Some(hwnd),
+            PCWSTR(wide.as_ptr()),
+            w!("Language Bubble"),
+            MB_OK | MB_ICONERROR,
+        );
+    }
 }
 
 fn handle_menu_command(hwnd: HWND, cmd: u16) {
@@ -479,119 +607,115 @@ fn handle_menu_command(hwnd: HWND, cmd: u16) {
         _ => {}
     }
 
-    with_app(|state| {
-        match cmd {
-            tray::CMD_EXIT => {
-                unsafe { PostQuitMessage(0) };
-            }
-            tray::CMD_FEEDBACK => {
-                unsafe {
-                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
-                        None,
-                        w!("open"),
-                        w!("https://github.com/nut1414/language-bubble/issues"),
-                        None,
-                        None,
-                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                    );
-                }
-            }
-            tray::CMD_CHECK_UPDATES_TOGGLE => {
-                let current = settings::get_check_for_updates();
-                settings::save_check_for_updates(!current);
-            }
-            tray::CMD_DOWNLOAD_UPDATE => {
-                unsafe {
-                    let _ = windows::Win32::UI::Shell::ShellExecuteW(
-                        None,
-                        w!("open"),
-                        w!("https://github.com/nut1414/language-bubble/releases/latest"),
-                        None,
-                        None,
-                        windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
-                    );
-                }
-            }
-            tray::CMD_START_WITH_WINDOWS => {
-                let current = settings::is_start_with_windows();
-                settings::set_start_with_windows(!current);
-            }
-            tray::CMD_HIDE_ON_TYPING => {
-                state.hide_on_typing = !state.hide_on_typing;
-                settings::save_hide_on_typing(state.hide_on_typing);
-            }
-            tray::CMD_EXPANDED_MRU_ONLY => {
-                state.expanded_mru_only = !state.expanded_mru_only;
-                settings::save_expanded_mru_only(state.expanded_mru_only);
-            }
-            c if (tray::CMD_SIZE_BASE..tray::CMD_SIZE_BASE + 5).contains(&c) => {
-                let sizes = [
-                    BubbleSize::ExtraSmall,
-                    BubbleSize::Small,
-                    BubbleSize::Medium,
-                    BubbleSize::Large,
-                    BubbleSize::ExtraLarge,
-                ];
-                let size = sizes[(c - tray::CMD_SIZE_BASE) as usize];
-                state.bubble.set_size(size);
-                settings::save_bubble_size(size);
-            }
-            c if (tray::CMD_KEY_CAPSLOCK_BASE..tray::CMD_KEY_CAPSLOCK_BASE + 3).contains(&c) => {
-                let mode = key_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_BASE) as usize);
-                state.caps_lock_mode = mode;
-                hook::set_caps_lock_mode(mode);
-                settings::save_key_mode("CapsLockMode", mode);
-                if mode != SwitchMode::Unused {
-                    capslock::ensure_caps_lock_off();
-                }
-            }
-            c if (tray::CMD_KEY_WINSPACE_BASE..tray::CMD_KEY_WINSPACE_BASE + 3).contains(&c) => {
-                let mode = key_mode_from_index((c - tray::CMD_KEY_WINSPACE_BASE) as usize);
-                state.win_space_mode = mode;
-                hook::set_win_space_mode(mode);
-                settings::save_key_mode("WinSpaceMode", mode);
-            }
-            c if (tray::CMD_KEY_ALTSHIFT_BASE..tray::CMD_KEY_ALTSHIFT_BASE + 3).contains(&c) => {
-                let mode = key_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_BASE) as usize);
-                state.alt_shift_mode = mode;
-                hook::set_alt_shift_mode(mode);
-                settings::save_key_mode("AltShiftMode", mode);
-            }
-            c if (tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE..tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3)
-                .contains(&c) =>
-            {
-                let mode = display_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE) as usize);
-                state.caps_lock_display = mode;
-                settings::save_key_display_mode("CapsLockDisplayMode", mode);
-            }
-            c if (tray::CMD_KEY_WINSPACE_DISPLAY_BASE..tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3)
-                .contains(&c) =>
-            {
-                let mode = display_mode_from_index((c - tray::CMD_KEY_WINSPACE_DISPLAY_BASE) as usize);
-                state.win_space_display = mode;
-                settings::save_key_display_mode("WinSpaceDisplayMode", mode);
-            }
-            c if (tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE..tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3)
-                .contains(&c) =>
-            {
-                let mode = display_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE) as usize);
-                state.alt_shift_display = mode;
-                settings::save_key_display_mode("AltShiftDisplayMode", mode);
-            }
-            c if (tray::CMD_THEME_BASE..tray::CMD_THEME_BASE + 4).contains(&c) => {
-                let mode = theme_mode_from_index((c - tray::CMD_THEME_BASE) as usize);
-                state.theme_mode = mode;
-                state.bubble.set_theme_mode(mode);
-                settings::save_theme_mode(mode);
-            }
-            c if c >= tray::CMD_OPACITY_BASE && c < tray::CMD_OPACITY_BASE + OPACITY_VALUES.len() as u16 => {
-                let idx = (c - tray::CMD_OPACITY_BASE) as usize;
-                state.custom_colors.opacity = OPACITY_VALUES[idx];
-                state.bubble.set_custom_colors(state.custom_colors);
-                settings::save_custom_theme_colors(&state.custom_colors);
-            }
-            _ => {}
+    with_app(|state| match cmd {
+        tray::CMD_EXIT => {
+            unsafe { PostQuitMessage(0) };
         }
+        tray::CMD_FEEDBACK => unsafe {
+            let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                None,
+                w!("open"),
+                w!("https://github.com/nut1414/language-bubble/issues"),
+                None,
+                None,
+                windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            );
+        },
+        tray::CMD_CHECK_UPDATES_TOGGLE => {
+            let current = settings::get_check_for_updates();
+            settings::save_check_for_updates(!current);
+        }
+        tray::CMD_DOWNLOAD_UPDATE => unsafe {
+            let _ = windows::Win32::UI::Shell::ShellExecuteW(
+                None,
+                w!("open"),
+                w!("https://github.com/nut1414/language-bubble/releases/latest"),
+                None,
+                None,
+                windows::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL,
+            );
+        },
+        tray::CMD_START_WITH_WINDOWS => {
+            let current = settings::is_start_with_windows();
+            settings::set_start_with_windows(!current);
+        }
+        tray::CMD_HIDE_ON_TYPING => {
+            state.hide_on_typing = !state.hide_on_typing;
+            settings::save_hide_on_typing(state.hide_on_typing);
+        }
+        tray::CMD_EXPANDED_MRU_ONLY => {
+            state.expanded_mru_only = !state.expanded_mru_only;
+            settings::save_expanded_mru_only(state.expanded_mru_only);
+        }
+        c if (tray::CMD_SIZE_BASE..tray::CMD_SIZE_BASE + 5).contains(&c) => {
+            let sizes = [
+                BubbleSize::ExtraSmall,
+                BubbleSize::Small,
+                BubbleSize::Medium,
+                BubbleSize::Large,
+                BubbleSize::ExtraLarge,
+            ];
+            let size = sizes[(c - tray::CMD_SIZE_BASE) as usize];
+            state.bubble.set_size(size);
+            settings::save_bubble_size(size);
+        }
+        c if (tray::CMD_KEY_CAPSLOCK_BASE..tray::CMD_KEY_CAPSLOCK_BASE + 3).contains(&c) => {
+            let mode = key_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_BASE) as usize);
+            state.caps_lock_mode = mode;
+            hook::set_caps_lock_mode(mode);
+            settings::save_key_mode("CapsLockMode", mode);
+            if mode != SwitchMode::Unused {
+                capslock::ensure_caps_lock_off();
+            }
+        }
+        c if (tray::CMD_KEY_WINSPACE_BASE..tray::CMD_KEY_WINSPACE_BASE + 3).contains(&c) => {
+            let mode = key_mode_from_index((c - tray::CMD_KEY_WINSPACE_BASE) as usize);
+            state.win_space_mode = mode;
+            hook::set_win_space_mode(mode);
+            settings::save_key_mode("WinSpaceMode", mode);
+        }
+        c if (tray::CMD_KEY_ALTSHIFT_BASE..tray::CMD_KEY_ALTSHIFT_BASE + 3).contains(&c) => {
+            let mode = key_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_BASE) as usize);
+            state.alt_shift_mode = mode;
+            hook::set_alt_shift_mode(mode);
+            settings::save_key_mode("AltShiftMode", mode);
+        }
+        c if (tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE..tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE + 3)
+            .contains(&c) =>
+        {
+            let mode = display_mode_from_index((c - tray::CMD_KEY_CAPSLOCK_DISPLAY_BASE) as usize);
+            state.caps_lock_display = mode;
+            settings::save_key_display_mode("CapsLockDisplayMode", mode);
+        }
+        c if (tray::CMD_KEY_WINSPACE_DISPLAY_BASE..tray::CMD_KEY_WINSPACE_DISPLAY_BASE + 3)
+            .contains(&c) =>
+        {
+            let mode = display_mode_from_index((c - tray::CMD_KEY_WINSPACE_DISPLAY_BASE) as usize);
+            state.win_space_display = mode;
+            settings::save_key_display_mode("WinSpaceDisplayMode", mode);
+        }
+        c if (tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE..tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE + 3)
+            .contains(&c) =>
+        {
+            let mode = display_mode_from_index((c - tray::CMD_KEY_ALTSHIFT_DISPLAY_BASE) as usize);
+            state.alt_shift_display = mode;
+            settings::save_key_display_mode("AltShiftDisplayMode", mode);
+        }
+        c if (tray::CMD_THEME_BASE..tray::CMD_THEME_BASE + 4).contains(&c) => {
+            let mode = theme_mode_from_index((c - tray::CMD_THEME_BASE) as usize);
+            state.theme_mode = mode;
+            state.bubble.set_theme_mode(mode);
+            settings::save_theme_mode(mode);
+        }
+        c if c >= tray::CMD_OPACITY_BASE
+            && c < tray::CMD_OPACITY_BASE + OPACITY_VALUES.len() as u16 =>
+        {
+            let idx = (c - tray::CMD_OPACITY_BASE) as usize;
+            state.custom_colors.opacity = OPACITY_VALUES[idx];
+            state.bubble.set_custom_colors(state.custom_colors);
+            settings::save_custom_theme_colors(&state.custom_colors);
+        }
+        _ => {}
     });
 }
 
@@ -641,3 +765,58 @@ fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    #[test]
+    fn label_edit_save_reset_and_cancel_have_distinct_persistence_actions() {
+        let saved = Cell::new(false);
+        let result = persist_label_edit(
+            0x0009,
+            label_dialog::LabelEditResult::Save("E".to_string()),
+            |language_id, label| {
+                assert_eq!(language_id, 0x0009);
+                assert_eq!(label, "E");
+                saved.set(true);
+                Ok::<(), ()>(())
+            },
+            |_| panic!("reset should not run while saving"),
+        );
+        assert!(saved.get());
+        assert_eq!(result, Ok(Some(RuntimeLabelUpdate::Set("E".to_string()))));
+
+        let result = persist_label_edit(
+            0x0009,
+            label_dialog::LabelEditResult::Reset,
+            |_, _| panic!("save should not run while resetting"),
+            |language_id| {
+                assert_eq!(language_id, 0x0009);
+                Ok::<(), ()>(())
+            },
+        );
+        assert_eq!(result, Ok(Some(RuntimeLabelUpdate::Reset)));
+
+        let result = persist_label_edit(
+            0x0009,
+            label_dialog::LabelEditResult::Cancel,
+            |_, _| panic!("save should not run after cancellation"),
+            |_| panic!("reset should not run after cancellation"),
+        );
+        assert_eq!(result, Ok::<_, ()>(None));
+    }
+
+    #[test]
+    fn failed_label_persistence_does_not_produce_a_runtime_update() {
+        let result = persist_label_edit(
+            0x0019,
+            label_dialog::LabelEditResult::Save("R".to_string()),
+            |_, _| Err("registry unavailable"),
+            |_| Ok(()),
+        );
+
+        assert_eq!(result, Err("registry unavailable"));
+    }
+}
