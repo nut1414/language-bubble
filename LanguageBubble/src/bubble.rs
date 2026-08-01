@@ -65,6 +65,7 @@ pub struct BubbleWindow {
     dwrite_factory: IDWriteFactory,
     render_target: Option<ID2D1HwndRenderTarget>,
     text_format: Option<IDWriteTextFormat>,
+    text_layouts: Vec<Option<IDWriteTextLayout>>,
     pub anim: AnimController,
     pub size: BubbleSize,
     pub display_mode: DisplayMode,
@@ -94,6 +95,7 @@ impl BubbleWindow {
             dwrite_factory,
             render_target: None,
             text_format: None,
+            text_layouts: Vec::new(),
             anim: AnimController::new(),
             size: BubbleSize::Medium,
             display_mode: DisplayMode::Carousel,
@@ -113,6 +115,7 @@ impl BubbleWindow {
     pub fn set_size(&mut self, size: BubbleSize) {
         self.size = size;
         self.create_text_format();
+        self.rebuild_text_layouts();
         self.render_target = None;
     }
 
@@ -147,8 +150,59 @@ impl BubbleWindow {
             if let Some(ref fmt) = self.text_format {
                 let _ = fmt.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
                 let _ = fmt.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+                let _ = fmt.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
             }
         }
+    }
+
+    fn rebuild_text_layouts(&mut self) {
+        self.text_layouts = self
+            .labels
+            .iter()
+            .map(|label| self.create_fitted_text_layout(label).ok())
+            .collect();
+    }
+
+    fn create_fitted_text_layout(&self, label: &str) -> windows::core::Result<IDWriteTextLayout> {
+        let Some(text_format) = &self.text_format else {
+            return Err(windows::core::Error::from_hresult(E_FAIL));
+        };
+        let metrics = self.size.metrics();
+        let wide: Vec<u16> = label.encode_utf16().collect();
+        let layout = unsafe {
+            self.dwrite_factory.CreateTextLayout(
+                &wide,
+                text_format,
+                metrics.item_width * 8.0,
+                metrics.item_height,
+            )?
+        };
+
+        unsafe {
+            let _ = layout.SetWordWrapping(DWRITE_WORD_WRAPPING_NO_WRAP);
+            let _ = layout.SetTextAlignment(DWRITE_TEXT_ALIGNMENT_CENTER);
+            let _ = layout.SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_CENTER);
+
+            let mut text_metrics = DWRITE_TEXT_METRICS::default();
+            layout.GetMetrics(&mut text_metrics)?;
+            let scale = fitted_font_scale(
+                text_metrics.widthIncludingTrailingWhitespace,
+                metrics.item_width * 0.9,
+            );
+            if scale < 1.0 {
+                layout.SetFontSize(
+                    metrics.font_size * scale,
+                    DWRITE_TEXT_RANGE {
+                        startPosition: 0,
+                        length: wide.len() as u32,
+                    },
+                )?;
+            }
+            layout.SetMaxWidth(metrics.item_width)?;
+            layout.SetMaxHeight(metrics.item_height)?;
+        }
+
+        Ok(layout)
     }
 
     fn ensure_render_target(&mut self) {
@@ -196,6 +250,7 @@ impl BubbleWindow {
     ) {
         self.stop_show_timers();
         self.labels = layouts.iter().map(|l| l.bubble_text.clone()).collect();
+        self.rebuild_text_layouts();
         let monitor = self.destination_monitor(caret);
         let dpi_scale = self.monitor_dpi_scale(monitor);
         let plan = calculate_show_plan(BubbleShowInput {
@@ -380,6 +435,7 @@ impl BubbleWindow {
         }
     }
 
+    #[allow(clippy::missing_transmute_annotations)]
     fn draw_frame(
         &self,
         rt: &ID2D1HwndRenderTarget,
@@ -508,15 +564,24 @@ impl BubbleWindow {
                         bottom: y + metrics.item_height,
                     };
 
-                    let wide: Vec<u16> = label_text.encode_utf16().collect();
-                    rt.DrawText(
-                        &wide,
-                        fmt,
-                        &rect,
-                        &fg_brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    if let Some(Some(text_layout)) = self.text_layouts.get(i) {
+                        rt.DrawTextLayout(
+                            mem::transmute([x, y]),
+                            text_layout,
+                            &fg_brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                        );
+                    } else {
+                        let wide: Vec<u16> = label_text.encode_utf16().collect();
+                        rt.DrawText(
+                            &wide,
+                            fmt,
+                            &rect,
+                            &fg_brush,
+                            D2D1_DRAW_TEXT_OPTIONS_NONE,
+                            DWRITE_MEASURING_MODE_NATURAL,
+                        );
+                    }
                 }
 
                 Ok(())
@@ -676,6 +741,14 @@ impl Drop for BubbleWindow {
     }
 }
 
+fn fitted_font_scale(natural_width: f32, available_width: f32) -> f32 {
+    if natural_width <= 0.0 || natural_width <= available_width {
+        1.0
+    } else {
+        (available_width / natural_width).clamp(0.1, 1.0)
+    }
+}
+
 fn work_area_from_rect(rect: RECT) -> WorkArea {
     WorkArea {
         left: rect.left,
@@ -760,4 +833,17 @@ fn is_dark_mode() -> bool {
         .flatten()
         .map(|value| value == 0)
         .unwrap_or(true)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_font_scaling_only_shrinks_overflowing_text() {
+        assert_eq!(fitted_font_scale(20.0, 27.0), 1.0);
+        assert_eq!(fitted_font_scale(0.0, 27.0), 1.0);
+        assert!((fitted_font_scale(54.0, 27.0) - 0.5).abs() < f32::EPSILON);
+        assert_eq!(fitted_font_scale(1000.0, 27.0), 0.1);
+    }
 }
