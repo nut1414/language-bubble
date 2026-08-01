@@ -41,13 +41,11 @@ impl LanguageService {
         unsafe {
             let count = GetKeyboardLayoutList(None) as usize;
             if count == 0 {
-                self.layouts.clear();
                 return;
             }
             let mut hkls = vec![HKL::default(); count];
             let copied = GetKeyboardLayoutList(Some(&mut hkls));
             if copied <= 0 {
-                self.layouts.clear();
                 return;
             }
             hkls.truncate(copied as usize);
