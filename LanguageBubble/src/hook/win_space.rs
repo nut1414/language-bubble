@@ -35,7 +35,24 @@ pub(super) struct WinSpaceState {
     win_used_for_combo: bool,
 }
 
+#[cfg(feature = "win-space-trace")]
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(super) struct WinSpaceSnapshot {
+    pub held_win_keys: u8,
+    pub space_suppressed: bool,
+    pub win_used_for_combo: bool,
+}
+
 impl WinSpaceState {
+    #[cfg(feature = "win-space-trace")]
+    pub(super) fn snapshot(&self) -> WinSpaceSnapshot {
+        WinSpaceSnapshot {
+            held_win_keys: self.held_win_keys,
+            space_suppressed: self.space_suppressed,
+            win_used_for_combo: self.win_used_for_combo,
+        }
+    }
+
     pub(super) fn handle(
         &mut self,
         event: WinSpaceEvent,
@@ -74,19 +91,27 @@ impl WinSpaceState {
                 }
             }
             WinSpaceEvent::SpaceDown => {
+                // Once the initial Space-down has been consumed, own all of
+                // its repeats until the matching Space-up. Win may already
+                // have been released, or interception may have been disabled
+                // while the physical Space key is still held.
+                if self.space_suppressed {
+                    return Some(WinSpaceDecision {
+                        suppress: true,
+                        ..Default::default()
+                    });
+                }
+
                 if !interception_enabled || self.held_win_keys == 0 {
                     return None;
                 }
 
-                let switch_layout = !self.space_suppressed;
-                if switch_layout {
-                    self.space_suppressed = true;
-                    self.win_used_for_combo = true;
-                }
+                self.space_suppressed = true;
+                self.win_used_for_combo = true;
 
                 Some(WinSpaceDecision {
                     suppress: true,
-                    switch_layout,
+                    switch_layout: true,
                     ..Default::default()
                 })
             }
@@ -212,6 +237,71 @@ mod tests {
             false,
             false,
         );
+    }
+
+    #[test]
+    fn repeated_space_down_after_win_release_stays_suppressed() {
+        let mut state = WinSpaceState::default();
+        press_combo(&mut state, WinKey::Left);
+
+        assert_decision(
+            state.handle(WinSpaceEvent::WinUp(WinKey::Left), true),
+            true,
+            false,
+            true,
+        );
+        assert_decision(
+            state.handle(WinSpaceEvent::SpaceDown, true),
+            true,
+            false,
+            false,
+        );
+        assert_decision(
+            state.handle(WinSpaceEvent::SpaceUp, true),
+            true,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn repeated_space_down_after_disabling_interception_stays_suppressed() {
+        let mut state = WinSpaceState::default();
+        press_combo(&mut state, WinKey::Left);
+
+        assert_decision(
+            state.handle(WinSpaceEvent::SpaceDown, false),
+            true,
+            false,
+            false,
+        );
+        assert_decision(
+            state.handle(WinSpaceEvent::SpaceUp, false),
+            true,
+            false,
+            false,
+        );
+    }
+
+    #[test]
+    fn consecutive_complete_chords_each_switch_once() {
+        let mut state = WinSpaceState::default();
+
+        for key in [WinKey::Left, WinKey::Right] {
+            press_combo(&mut state, key);
+            assert_decision(
+                state.handle(WinSpaceEvent::SpaceUp, true),
+                true,
+                false,
+                false,
+            );
+            assert_decision(
+                state.handle(WinSpaceEvent::WinUp(key), true),
+                true,
+                false,
+                true,
+            );
+        }
     }
 
     #[test]
