@@ -211,6 +211,58 @@ fn get_locale_info(locale: u32, lctype: u32, buf: &mut [u16]) -> i32 {
 }
 
 fn get_bubble_text(iso_code: &str, lang_id: u16) -> String {
+    let glyph = match iso_code {
+        // These groups previously rendered as identical or near-identical glyphs.
+        "en" | "ru" | "el" | "bn" | "as" | "mk" | "mn" => {
+            return fallback_label(iso_code, lang_id);
+        }
+        "ja" => "\u{3042}",
+        "zh" => "\u{4E2D}",
+        "ko" => "\u{AC00}",
+        "th" => "\u{0E01}",
+        "km" => "\u{1780}",
+        "lo" => "\u{0EA5}",
+        "my" => "\u{1000}",
+        "hi" => "\u{0905}",
+        "mr" => "\u{092E}",
+        "ne" => "\u{0928}",
+        "sa" => "\u{0938}",
+        "gu" => "\u{0A97}",
+        "pa" => "\u{0A2A}",
+        "ta" => "\u{0BA4}",
+        "te" => "\u{0C24}",
+        "kn" => "\u{0C95}",
+        "ml" => "\u{0D2E}",
+        "si" => "\u{0DC3}",
+        "or" => "\u{0B13}",
+        "ur" => "\u{0627}",
+        "ar" => "\u{0639}",
+        "fa" => "\u{0641}",
+        "ps" => "\u{067E}",
+        "ug" => "\u{0626}",
+        "sd" => "\u{0633}",
+        "ku" => "\u{06A9}",
+        "he" => "\u{05D0}",
+        "yi" => "\u{05D9}",
+        "uk" => "\u{0423}",
+        "bg" => "\u{0411}",
+        "sr" => "\u{0421}",
+        "kk" => "\u{049A}",
+        "ky" => "\u{041A}",
+        "tg" => "\u{0422}",
+        "ka" => "\u{10D0}",
+        "hy" => "\u{0531}",
+        "bo" => "\u{0F56}",
+        "am" => "\u{12A0}",
+        "ti" => "\u{1275}",
+        "iu" => "\u{1403}",
+        "cr" => "\u{1431}",
+        _ => return fallback_label(iso_code, lang_id),
+    };
+    glyph.to_string()
+}
+
+fn fallback_label(iso_code: &str, lang_id: u16) -> String {
     if (2..=3).contains(&iso_code.len()) && iso_code.bytes().all(|byte| byte.is_ascii_alphabetic())
     {
         iso_code.to_ascii_uppercase()
@@ -222,6 +274,16 @@ fn get_bubble_text(iso_code: &str, lang_id: u16) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distinctive_languages_keep_hand_picked_glyphs() {
+        assert_eq!(get_bubble_text("ja", 0x0411), "\u{3042}");
+        assert_eq!(get_bubble_text("zh", 0x0804), "\u{4E2D}");
+        assert_eq!(get_bubble_text("ko", 0x0412), "\u{AC00}");
+        assert_eq!(get_bubble_text("th", 0x041E), "\u{0E01}");
+        assert_eq!(get_bubble_text("ar", 0x0401), "\u{0639}");
+        assert_eq!(get_bubble_text("uk", 0x0422), "\u{0423}");
+    }
 
     #[test]
     fn collision_prone_languages_use_distinct_iso_codes() {
@@ -236,6 +298,7 @@ mod tests {
 
     #[test]
     fn three_letter_and_missing_iso_codes_have_stable_defaults() {
+        assert_eq!(get_bubble_text("fr", 0x040C), "FR");
         assert_eq!(get_bubble_text("haw", 0x0475), "HAW");
         assert_eq!(get_bubble_text("??", 0x1234), "1234");
     }
