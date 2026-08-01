@@ -213,9 +213,10 @@ fn get_locale_info(locale: u32, lctype: u32, buf: &mut [u16]) -> i32 {
 fn get_bubble_text(iso_code: &str, lang_id: u16) -> String {
     let glyph = match iso_code {
         // These groups previously rendered as identical or near-identical glyphs.
-        "en" | "ru" | "el" | "bn" | "as" | "mk" | "mn" => {
+        "ru" | "el" | "bn" | "as" | "mk" | "mn" => {
             return fallback_label(iso_code, lang_id);
         }
+        "en" => "A",
         "ja" => "\u{3042}",
         "zh" => "\u{4E2D}",
         "ko" => "\u{AC00}",
@@ -286,8 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn collision_prone_languages_use_distinct_iso_codes() {
-        assert_eq!(get_bubble_text("en", 0x0409), "EN");
+    fn collision_prone_languages_use_distinct_labels() {
+        assert_eq!(get_bubble_text("en", 0x0409), "A");
         assert_eq!(get_bubble_text("ru", 0x0419), "RU");
         assert_eq!(get_bubble_text("el", 0x0408), "EL");
         assert_eq!(get_bubble_text("bn", 0x0445), "BN");
