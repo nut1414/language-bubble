@@ -34,8 +34,8 @@ rustup target add aarch64-pc-windows-msvc
 From `LanguageBubble/`:
 
 ```powershell
-cargo build --release --target x86_64-pc-windows-msvc
-cargo build --release --target aarch64-pc-windows-msvc
+cargo build --release --locked --target x86_64-pc-windows-msvc
+cargo build --release --locked --target aarch64-pc-windows-msvc
 ```
 
 Or run the helper script:
@@ -49,9 +49,19 @@ Build outputs:
 - `LanguageBubble/target/x86_64-pc-windows-msvc/release/language-bubble.exe`
 - `LanguageBubble/target/aarch64-pc-windows-msvc/release/language-bubble.exe`
 
+### Quality checks
+
+Run the same checks used by CI from `LanguageBubble/`:
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked --all-targets
+```
+
 ## Usage
 
-Use the capslock key to switch languages
+Use the Caps Lock key to switch languages.
 
 ## Download
 

@@ -6,10 +6,32 @@ pub enum SwitchMode {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
 pub enum HookKeyCombo {
-    CapsLock,
-    WinSpace,
-    AltShift,
+    CapsLock = 0,
+    WinSpace = 1,
+    AltShift = 2,
+}
+
+impl HookKeyCombo {
+    pub const ALL: [Self; 3] = [Self::CapsLock, Self::WinSpace, Self::AltShift];
+
+    const fn index(self) -> usize {
+        self as usize
+    }
+}
+
+impl TryFrom<usize> for HookKeyCombo {
+    type Error = ();
+
+    fn try_from(value: usize) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::CapsLock),
+            1 => Ok(Self::WinSpace),
+            2 => Ok(Self::AltShift),
+            _ => Err(()),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -43,6 +65,60 @@ pub struct CustomThemeColors {
     pub bg_color: u32,
     pub fg_color: u32,
     pub opacity: u8,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBindingConfig {
+    pub switch_mode: SwitchMode,
+    pub display_mode: DisplayMode,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct KeyBindings {
+    entries: [KeyBindingConfig; 3],
+}
+
+impl KeyBindings {
+    pub const fn new(
+        caps_lock: KeyBindingConfig,
+        win_space: KeyBindingConfig,
+        alt_shift: KeyBindingConfig,
+    ) -> Self {
+        Self {
+            entries: [caps_lock, win_space, alt_shift],
+        }
+    }
+
+    pub fn get(&self, combo: HookKeyCombo) -> KeyBindingConfig {
+        self.entries[combo.index()]
+    }
+
+    pub fn set_switch_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
+        self.entries[combo.index()].switch_mode = mode;
+    }
+
+    pub fn set_display_mode(&mut self, combo: HookKeyCombo, mode: DisplayMode) {
+        self.entries[combo.index()].display_mode = mode;
+    }
+}
+
+impl Default for KeyBindings {
+    fn default() -> Self {
+        Self::new(
+            KeyBindingConfig {
+                switch_mode: SwitchMode::AllLanguage,
+                display_mode: DisplayMode::Carousel,
+            },
+            KeyBindingConfig {
+                switch_mode: SwitchMode::Unused,
+                display_mode: DisplayMode::Carousel,
+            },
+            KeyBindingConfig {
+                switch_mode: SwitchMode::Unused,
+                display_mode: DisplayMode::Carousel,
+            },
+        )
+    }
 }
 
 impl Default for CustomThemeColors {
@@ -181,5 +257,103 @@ impl ThemeMode {
             ThemeMode::Dark => "Dark",
             ThemeMode::Custom => "Custom",
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn hook_key_combo_message_values_are_stable_and_checked() {
+        for (value, combo) in HookKeyCombo::ALL.into_iter().enumerate() {
+            assert_eq!(combo as usize, value);
+            assert_eq!(HookKeyCombo::try_from(value), Ok(combo));
+        }
+        assert_eq!(HookKeyCombo::try_from(3), Err(()));
+        assert_eq!(HookKeyCombo::try_from(usize::MAX), Err(()));
+    }
+
+    #[test]
+    fn key_bindings_preserve_existing_defaults() {
+        let bindings = KeyBindings::default();
+        assert_eq!(
+            bindings.get(HookKeyCombo::CapsLock),
+            KeyBindingConfig {
+                switch_mode: SwitchMode::AllLanguage,
+                display_mode: DisplayMode::Carousel,
+            }
+        );
+        for combo in [HookKeyCombo::WinSpace, HookKeyCombo::AltShift] {
+            assert_eq!(
+                bindings.get(combo),
+                KeyBindingConfig {
+                    switch_mode: SwitchMode::Unused,
+                    display_mode: DisplayMode::Carousel,
+                }
+            );
+        }
+    }
+
+    #[test]
+    fn key_bindings_update_only_the_selected_combo() {
+        let mut bindings = KeyBindings::default();
+        bindings.set_switch_mode(HookKeyCombo::WinSpace, SwitchMode::Mru);
+        bindings.set_display_mode(HookKeyCombo::WinSpace, DisplayMode::Expanded);
+
+        assert_eq!(
+            bindings.get(HookKeyCombo::WinSpace),
+            KeyBindingConfig {
+                switch_mode: SwitchMode::Mru,
+                display_mode: DisplayMode::Expanded,
+            }
+        );
+        assert_eq!(
+            bindings.get(HookKeyCombo::CapsLock),
+            KeyBindings::default().get(HookKeyCombo::CapsLock)
+        );
+        assert_eq!(
+            bindings.get(HookKeyCombo::AltShift),
+            KeyBindings::default().get(HookKeyCombo::AltShift)
+        );
+    }
+
+    #[test]
+    fn persisted_enum_values_round_trip() {
+        for mode in [SwitchMode::Unused, SwitchMode::Mru, SwitchMode::AllLanguage] {
+            assert_eq!(SwitchMode::from_str(mode.as_str()), mode);
+        }
+        for size in [
+            BubbleSize::ExtraSmall,
+            BubbleSize::Small,
+            BubbleSize::Medium,
+            BubbleSize::Large,
+            BubbleSize::ExtraLarge,
+        ] {
+            assert_eq!(BubbleSize::from_str(size.as_str()), size);
+        }
+        for mode in [
+            DisplayMode::Carousel,
+            DisplayMode::Simple,
+            DisplayMode::Expanded,
+        ] {
+            assert_eq!(DisplayMode::from_str(mode.as_str()), mode);
+        }
+        for mode in [
+            ThemeMode::System,
+            ThemeMode::Light,
+            ThemeMode::Dark,
+            ThemeMode::Custom,
+        ] {
+            assert_eq!(ThemeMode::from_str(mode.as_str()), mode);
+        }
+    }
+
+    #[test]
+    fn unknown_persisted_values_keep_existing_fallbacks() {
+        assert_eq!(SwitchMode::from_str("unknown"), SwitchMode::Unused);
+        assert_eq!(BubbleSize::from_str("unknown"), BubbleSize::Medium);
+        assert_eq!(DisplayMode::from_str("unknown"), DisplayMode::Carousel);
+        assert_eq!(ThemeMode::from_str("unknown"), ThemeMode::System);
     }
 }

@@ -1,0 +1,67 @@
+name: Build branch binary
+
+run-name: Build ${{ github.ref_name }} for all architectures
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: Build Windows ${{ matrix.architecture }} binary
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+          - architecture: arm64
+            target: aarch64-pc-windows-msvc
+    env:
+      BUILD_TARGET: ${{ matrix.target }}
+
+    steps:
+      - name: Check out selected branch
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ env.BUILD_TARGET }}
+
+      - name: Build release binary
+        working-directory: LanguageBubble
+        run: cargo build --release --locked --target ${{ env.BUILD_TARGET }}
+
+      - name: Prepare artifact
+        id: artifact
+        shell: pwsh
+        run: |
+          $shortSha = $env:GITHUB_SHA.Substring(0, 7)
+          $safeBranch = $env:GITHUB_REF_NAME -replace '[^A-Za-z0-9._-]', '-'
+          $artifactName = "LanguageBubble-$safeBranch-$shortSha-${{ matrix.architecture }}"
+          New-Item -ItemType Directory -Path dist | Out-Null
+          Copy-Item "LanguageBubble/target/$env:BUILD_TARGET/release/language-bubble.exe" "dist/$artifactName.exe"
+          "name=$artifactName" >> $env:GITHUB_OUTPUT
+
+      - name: Upload binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: dist/*.exe
+          if-no-files-found: error
+
+      - name: Add download instructions
+        shell: pwsh
+        run: |
+          @"
+          ### Branch binary built
+
+          Download the **${{ steps.artifact.outputs.name }}** artifact from this workflow run. GitHub packages the executable as a ZIP file, which can then be attached to an issue or shared elsewhere.
+
+          Commit: $env:GITHUB_SHA
+          "@ >> $env:GITHUB_STEP_SUMMARY

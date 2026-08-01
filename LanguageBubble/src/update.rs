@@ -1,9 +1,9 @@
 use std::sync::Mutex;
 use std::time::{SystemTime, UNIX_EPOCH};
-use windows::core::{w, PCWSTR};
 use windows::Win32::Foundation::HWND;
 use windows::Win32::Networking::WinHttp::*;
 use windows::Win32::UI::WindowsAndMessaging::{PostMessageW, WM_USER};
+use windows::core::{PCWSTR, w};
 
 const USER_AGENT: &str = concat!("language-bubble/", env!("CARGO_PKG_VERSION"));
 
@@ -20,7 +20,7 @@ impl Drop for HttpHandle {
     }
 }
 
-pub fn check_in_background(hwnd: HWND) {
+pub fn check_in_background(hwnd: HWND, settings: crate::settings::UserSettingsStore) {
     let hwnd_value = hwnd.0 as isize;
     std::thread::spawn(move || {
         let hwnd = HWND(hwnd_value as *mut _);
@@ -30,13 +30,19 @@ pub fn check_in_background(hwnd: HWND) {
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
                 .as_secs();
-            crate::settings::save_last_update_check(now);
+            crate::settings::report_result(
+                "save last update check",
+                settings.save_last_update_check(now),
+            );
 
             let current = env!("CARGO_PKG_VERSION");
-            let old_last_seen = crate::settings::get_last_seen_version();
+            let old_last_seen = settings.last_seen_version();
 
             if is_newer(&tag, &old_last_seen) {
-                crate::settings::save_last_seen_version(&tag);
+                crate::settings::report_result(
+                    "save last seen version",
+                    settings.save_last_seen_version(&tag),
+                );
             }
 
             if is_newer(&tag, current)
@@ -59,7 +65,10 @@ pub fn check_in_background(hwnd: HWND) {
 
 fn fetch_latest_tag() -> Option<String> {
     unsafe {
-        let ua_wide: Vec<u16> = USER_AGENT.encode_utf16().chain(std::iter::once(0)).collect();
+        let ua_wide: Vec<u16> = USER_AGENT
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect();
         let session = HttpHandle(WinHttpOpen(
             PCWSTR(ua_wide.as_ptr()),
             WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
@@ -101,11 +110,7 @@ fn fetch_latest_tag() -> Option<String> {
             USER_AGENT
         );
         let headers_wide: Vec<u16> = headers_str.encode_utf16().collect();
-        let _ = WinHttpAddRequestHeaders(
-            request.0,
-            &headers_wide,
-            WINHTTP_ADDREQ_FLAG_ADD,
-        );
+        let _ = WinHttpAddRequestHeaders(request.0, &headers_wide, WINHTTP_ADDREQ_FLAG_ADD);
 
         if WinHttpSendRequest(request.0, None, None, 0, 0, 0).is_err() {
             return None;
@@ -133,7 +138,9 @@ fn fetch_latest_tag() -> Option<String> {
                 chunk.as_mut_ptr() as *mut _,
                 available,
                 &mut read,
-            ).is_err() {
+            )
+            .is_err()
+            {
                 return None;
             }
             chunk.truncate(read as usize);
@@ -142,11 +149,7 @@ fn fetch_latest_tag() -> Option<String> {
 
         let json = String::from_utf8(body).ok()?;
         let tag = extract_tag_name(&json)?;
-        if is_valid_tag(&tag) {
-            Some(tag)
-        } else {
-            None
-        }
+        if is_valid_tag(&tag) { Some(tag) } else { None }
     }
 }
 
@@ -215,9 +218,9 @@ fn parse_semver(s: &str) -> Option<(u32, u32, u32)> {
 
 /// On startup, restore the "Download update..." menu entry if the registry says
 /// we previously saw a release newer than what's currently installed.
-pub fn pending_from_registry() -> Option<String> {
+pub fn pending_from_registry(settings: crate::settings::UserSettingsStore) -> Option<String> {
     let current = env!("CARGO_PKG_VERSION");
-    let last_seen = crate::settings::get_last_seen_version();
+    let last_seen = settings.last_seen_version();
     if last_seen.is_empty() || !is_valid_tag(&last_seen) {
         return None;
     }
@@ -236,5 +239,59 @@ fn is_newer(latest: &str, current: &str) -> bool {
         (Some(l), Some(c)) => l > c,
         (Some(_), None) => true,
         _ => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tag_name_extraction_accepts_expected_github_json() {
+        assert_eq!(
+            extract_tag_name(r#"{"name":"Release","tag_name":"v1.2.3"}"#),
+            Some("v1.2.3".to_string())
+        );
+        assert_eq!(
+            extract_tag_name("{\n  \"tag_name\" : \"0.4.1\"\n}"),
+            Some("0.4.1".to_string())
+        );
+    }
+
+    #[test]
+    fn tag_name_extraction_rejects_missing_or_malformed_fields() {
+        assert_eq!(extract_tag_name(r#"{"name":"v1.2.3"}"#), None);
+        assert_eq!(extract_tag_name(r#"{"tag_name":1}"#), None);
+        assert_eq!(extract_tag_name(r#"{"tag_name":"v1.2.3}"#), None);
+    }
+
+    #[test]
+    fn release_tags_are_validated() {
+        for tag in ["0.4.1", "v1.2.3", "1.2.3-beta"] {
+            assert!(is_valid_tag(tag), "{tag} should be valid");
+        }
+        for tag in ["", "1.2.3 beta", "1.2.3/asset", "1.2.3_"] {
+            assert!(!is_valid_tag(tag), "{tag} should be invalid");
+        }
+        assert!(!is_valid_tag(&"a".repeat(65)));
+    }
+
+    #[test]
+    fn semantic_versions_parse_strictly() {
+        assert_eq!(parse_semver("0.4.0"), Some((0, 4, 0)));
+        assert_eq!(parse_semver("v1.2.3"), Some((1, 2, 3)));
+        for version in ["1.2", "1.2.3.4", "1.2.3-beta", "v", "1.two.3"] {
+            assert_eq!(parse_semver(version), None);
+        }
+    }
+
+    #[test]
+    fn version_comparison_preserves_update_behavior() {
+        assert!(is_newer("0.4.1", "0.4.0"));
+        assert!(is_newer("1.0.0", "0.4.0"));
+        assert!(is_newer("0.4.0", ""));
+        assert!(!is_newer("0.4.0", "0.4.0"));
+        assert!(!is_newer("0.3.9", "0.4.0"));
+        assert!(!is_newer("0.4.1-beta", "0.4.0"));
     }
 }

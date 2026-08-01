@@ -157,8 +157,7 @@ impl AnimController {
     }
 
     pub fn is_window_slide_complete(&self) -> bool {
-        !self.win_sliding
-            || self.win_slide_start.elapsed().as_secs_f64() >= WIN_SLIDE_MS / 1000.0
+        !self.win_sliding || self.win_slide_start.elapsed().as_secs_f64() >= WIN_SLIDE_MS / 1000.0
     }
 
     pub fn finish_window_slide(&mut self) {
