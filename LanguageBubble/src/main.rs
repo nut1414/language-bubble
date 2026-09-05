@@ -45,6 +45,8 @@ struct AppState {
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
     pending_update: Option<String>,
+    #[cfg(feature = "win-space-trace")]
+    win_space_trace: hook::WinSpaceTraceFile,
 }
 
 struct ComApartment;
@@ -235,6 +237,8 @@ fn run() -> Result<()> {
 
     // Install keyboard hook
     let installed_hook = hook::InstalledHook::install(msg_hwnd, &bindings)?;
+    #[cfg(feature = "win-space-trace")]
+    let win_space_trace = hook::WinSpaceTraceFile::create();
 
     // Force Caps Lock off on startup if intercepting
     if bindings.get(HookKeyCombo::CapsLock).switch_mode != SwitchMode::Unused {
@@ -257,6 +261,8 @@ fn run() -> Result<()> {
             is_switching: false,
             pending_combo: None,
             pending_update,
+            #[cfg(feature = "win-space-trace")]
+            win_space_trace,
         });
     });
 
@@ -333,6 +339,14 @@ unsafe extern "system" fn msg_wnd_proc(
 ) -> LRESULT {
     unsafe {
         match msg {
+            #[cfg(feature = "win-space-trace")]
+            m if m == hook::WM_WIN_SPACE_TRACE => {
+                with_app(|state| {
+                    let drain = state.hook.drain_win_space_trace();
+                    state.win_space_trace.append(drain);
+                });
+                LRESULT(0)
+            }
             m if m == hook::WM_SWITCH_KEY => {
                 let Ok(combo) = HookKeyCombo::try_from(wparam.0) else {
                     return LRESULT(0);
