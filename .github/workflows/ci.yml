@@ -35,3 +35,30 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked --all-targets
+
+      - name: Test release scripts in temporary fixtures
+        working-directory: .
+        run: .\scripts\test-release.ps1
+
+  build:
+    name: Build Windows ${{ matrix.architecture }}
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - architecture: x64
+            target: x86_64-pc-windows-msvc
+          - architecture: arm64
+            target: aarch64-pc-windows-msvc
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build release binary
+        working-directory: LanguageBubble
+        run: cargo build --release --locked --target ${{ matrix.target }}

@@ -1,4 +1,6 @@
-use windows::ApplicationModel::{Package, StartupTask, StartupTaskState};
+mod startup;
+pub use startup::{is_msix_packaged, is_start_with_windows, set_start_with_windows};
+
 use windows::Win32::System::Diagnostics::Debug::OutputDebugStringW;
 use windows::Win32::System::Registry::{HKEY_CURRENT_USER, KEY_READ, KEY_WRITE};
 use windows::core::{Error, HRESULT, PCWSTR, Result, w};
@@ -7,9 +9,6 @@ use crate::registry::RegistryKey;
 use crate::types::*;
 
 const SUBKEY: PCWSTR = w!("Software\\LanguageBubble");
-const RUN_SUBKEY: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const APP_NAME: PCWSTR = w!("LanguageBubble");
-const STARTUP_TASK_ID: &str = "LanguageBubbleStartup";
 const GENERIC_FAILURE: HRESULT = HRESULT(0x80004005u32 as i32);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -271,86 +270,6 @@ impl SettingsStore<RegistrySettingsBackend> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum StartupRoute {
-    Msix,
-    Registry,
-}
-
-const fn startup_route(packaged: bool) -> StartupRoute {
-    if packaged {
-        StartupRoute::Msix
-    } else {
-        StartupRoute::Registry
-    }
-}
-
-pub fn is_msix_packaged() -> bool {
-    Package::Current().is_ok()
-}
-
-pub fn is_start_with_windows() -> bool {
-    let result = match startup_route(is_msix_packaged()) {
-        StartupRoute::Msix => is_start_with_windows_msix(),
-        StartupRoute::Registry => is_start_with_windows_registry(),
-    };
-    match result {
-        Ok(enabled) => enabled,
-        Err(error) => {
-            debug_error("read startup registration", &error);
-            false
-        }
-    }
-}
-
-pub fn set_start_with_windows(enable: bool) {
-    let result = match startup_route(is_msix_packaged()) {
-        StartupRoute::Msix => set_start_with_windows_msix(enable),
-        StartupRoute::Registry => set_start_with_windows_registry(enable),
-    };
-    report_result("write startup registration", result);
-}
-
-fn is_start_with_windows_msix() -> Result<bool> {
-    let task = StartupTask::GetAsync(&STARTUP_TASK_ID.into())?.get()?;
-    let state = task.State()?;
-    Ok(matches!(
-        state,
-        StartupTaskState::Enabled | StartupTaskState::EnabledByPolicy
-    ))
-}
-
-fn set_start_with_windows_msix(enable: bool) -> Result<()> {
-    let task = StartupTask::GetAsync(&STARTUP_TASK_ID.into())?.get()?;
-    if enable {
-        let _ = task.RequestEnableAsync()?.get()?;
-    } else {
-        task.Disable()?;
-    }
-    Ok(())
-}
-
-fn is_start_with_windows_registry() -> Result<bool> {
-    let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_READ)? else {
-        return Ok(false);
-    };
-    key.value_exists(APP_NAME)
-}
-
-fn set_start_with_windows_registry(enable: bool) -> Result<()> {
-    if enable {
-        let key = RegistryKey::create(HKEY_CURRENT_USER, RUN_SUBKEY)?;
-        let executable = std::env::current_exe()
-            .map_err(|error| Error::new(GENERIC_FAILURE, error.to_string()))?;
-        key.set_string(APP_NAME, &format!("\"{}\"", executable.display()))
-    } else if let Some(key) = RegistryKey::open_optional(HKEY_CURRENT_USER, RUN_SUBKEY, KEY_WRITE)?
-    {
-        key.delete_value(APP_NAME)
-    } else {
-        Ok(())
-    }
-}
-
 pub fn report_result(context: &str, result: Result<()>) {
     if let Err(error) = result {
         debug_error(context, &error);
@@ -577,11 +496,5 @@ mod tests {
         let store = SettingsStore::new(backend);
         assert_eq!(store.bubble_size(), BubbleSize::Medium);
         assert!(store.save_bubble_size(BubbleSize::Large).is_err());
-    }
-
-    #[test]
-    fn packaged_startup_routes_to_startup_task() {
-        assert_eq!(startup_route(true), StartupRoute::Msix);
-        assert_eq!(startup_route(false), StartupRoute::Registry);
     }
 }

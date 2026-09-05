@@ -59,6 +59,10 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 ```
 
+## Refactor planning
+
+See the [refactor execution map](docs/refactor/README.md) for seven scoped work packets, validation gates, and external-agent handoff instructions.
+
 ## Usage
 
 Use the Caps Lock key to switch languages.

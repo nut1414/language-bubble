@@ -1,3 +1,5 @@
+mod selection;
+
 use std::ffi::OsString;
 use std::os::windows::ffi::OsStringExt;
 
@@ -67,22 +69,16 @@ impl LanguageService {
     }
 
     pub fn record_layout_usage(&mut self, hkl: HKL) {
-        if let Some(layout) = self.layouts.iter().find(|l| l.hkl == hkl)
-            && layout.two_letter != "en"
-        {
-            self.last_non_english_hkl = Some(hkl);
-        }
+        self.last_non_english_hkl =
+            selection::remember_usage(&self.layouts, self.last_non_english_hkl, hkl);
     }
 
     pub fn switch_to_next(&self) -> Option<&LayoutInfo> {
         if self.layouts.len() <= 1 {
             return self.layouts.first();
         }
-        let current = self.get_current_layout();
-        let current_idx = current
-            .and_then(|c| self.layouts.iter().position(|l| l.hkl == c.hkl))
-            .unwrap_or(0);
-        let next_idx = (current_idx + 1) % self.layouts.len();
+        let current = self.get_current_layout().map(|layout| layout.hkl);
+        let next_idx = selection::next_index(&self.layouts, current)?;
         let target = &self.layouts[next_idx];
         activate_layout(target);
         Some(target)
@@ -92,49 +88,23 @@ impl LanguageService {
         if self.layouts.len() <= 1 {
             return self.layouts.first();
         }
-        let current = self.get_current_layout();
-        let current_is_english = current.is_some_and(|c| c.two_letter == "en");
-
-        if current_is_english {
-            // Switch to last non-English
-            if let Some(last_hkl) = self.last_non_english_hkl
-                && let Some(target) = self.layouts.iter().find(|l| l.hkl == last_hkl)
-            {
-                activate_layout(target);
-                return Some(target);
-            }
-            // Fallback: first non-English
-            if let Some(target) = self.layouts.iter().find(|l| l.two_letter != "en") {
-                activate_layout(target);
-                return Some(target);
-            }
-        } else {
-            // Switch back to English
-            if let Some(target) = self.layouts.iter().find(|l| l.two_letter == "en") {
-                activate_layout(target);
-                return Some(target);
-            }
+        let current = self.get_current_layout().map(|layout| layout.hkl);
+        if let Some(index) =
+            selection::mru_target(&self.layouts, current, self.last_non_english_hkl)
+        {
+            let target = &self.layouts[index];
+            activate_layout(target);
+            return Some(target);
         }
+        // Preserve the fresh foreground query performed by the original fallback.
         self.switch_to_next()
     }
 
     pub fn get_mru_layouts(&self) -> Vec<LayoutInfo> {
-        let mut result = Vec::new();
-        if let Some(en) = self.layouts.iter().find(|l| l.two_letter == "en") {
-            result.push(en.clone());
-        }
-        let non_en = self
-            .last_non_english_hkl
-            .and_then(|hkl| self.layouts.iter().find(|l| l.hkl == hkl))
-            .or_else(|| self.layouts.iter().find(|l| l.two_letter != "en"));
-        if let Some(l) = non_en {
-            result.push(l.clone());
-        }
-        if result.is_empty() {
-            self.layouts.clone()
-        } else {
-            result
-        }
+        selection::mru_indices(&self.layouts, self.last_non_english_hkl)
+            .into_iter()
+            .map(|index| self.layouts[index].clone())
+            .collect()
     }
 }
 

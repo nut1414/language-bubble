@@ -15,29 +15,7 @@ $cargoTomlPath = Join-Path $cargoDir "Cargo.toml"
 $cargoLockPath = Join-Path $cargoDir "Cargo.lock"
 $manifestPath = Join-Path $packageDir "Package.appxmanifest"
 
-$cargoPattern = '(?ms)(?<prefix>^\[package\]\s*\r?\n(?:(?!^\[).)*?^version\s*=\s*")(?<version>\d+\.\d+\.\d+)(?<suffix>")'
-$lockPattern = '(?ms)(?<prefix>^\[\[package\]\]\s*\r?\n(?:(?!^\[\[package\]\]).)*?^name\s*=\s*"language-bubble"\s*\r?\n(?:(?!^\[\[package\]\]).)*?^version\s*=\s*")(?<version>\d+\.\d+\.\d+)(?<suffix>")'
-$manifestPattern = '(?s)(?<prefix><Identity\b[^>]*\bVersion=")(?<version>\d+\.\d+\.\d+\.\d+)(?<suffix>")'
-
-function Get-VersionMatch {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Text,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Pattern,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    $matches = [regex]::Matches($Text, $Pattern)
-    if ($matches.Count -ne 1) {
-        throw "Expected exactly one $Description version, found $($matches.Count)."
-    }
-
-    return $matches[0]
-}
+. (Join-Path $PSScriptRoot "release-versions.ps1")
 
 function Get-HostArchitecture {
     $architecture = $env:PROCESSOR_ARCHITECTURE
@@ -353,20 +331,12 @@ foreach ($path in @($cargoTomlPath, $cargoLockPath, $manifestPath, (Join-Path $p
 $cargoText = [System.IO.File]::ReadAllText($cargoTomlPath)
 $lockText = [System.IO.File]::ReadAllText($cargoLockPath)
 $manifestText = [System.IO.File]::ReadAllText($manifestPath)
-$cargoVersion = (Get-VersionMatch -Text $cargoText -Pattern $cargoPattern -Description "Cargo package").Groups["version"].Value
-$lockVersion = (Get-VersionMatch -Text $lockText -Pattern $lockPattern -Description "Cargo lockfile package").Groups["version"].Value
-$manifestVersion = (Get-VersionMatch -Text $manifestText -Pattern $manifestPattern -Description "MSIX manifest").Groups["version"].Value
-$storeVersion = "$cargoVersion.0"
+$versions = Get-ReleaseVersions -CargoText $cargoText -LockText $lockText -ManifestText $manifestText
+$cargoVersion = $versions.Cargo
+$storeVersion = $versions.Store
 [xml]$sourceManifest = $manifestText
 $expectedIdentityName = $sourceManifest.Package.Identity.Name
 $expectedPublisher = $sourceManifest.Package.Identity.Publisher
-
-if ($lockVersion -ne $cargoVersion) {
-    throw "Cargo.toml version '$cargoVersion' does not match Cargo.lock version '$lockVersion'."
-}
-if ($manifestVersion -ne $storeVersion) {
-    throw "Cargo version '$cargoVersion' requires MSIX version '$storeVersion', but the manifest contains '$manifestVersion'."
-}
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $OutputDirectory = Join-Path $repoRoot "release"
@@ -463,7 +433,15 @@ try {
 }
 finally {
     if (Test-Path -LiteralPath $tempRoot) {
-        Remove-Item -LiteralPath $tempRoot -Recurse -Force
+        $resolvedTemp = (Resolve-Path -LiteralPath $tempRoot).Path
+        $expectedTemp = [System.IO.Path]::GetFullPath($tempRoot)
+        $tempParent = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath()).TrimEnd('\')
+        if ($resolvedTemp -ne $expectedTemp -or
+            (Split-Path -Parent $resolvedTemp).TrimEnd('\') -ne $tempParent -or
+            (Split-Path -Leaf $resolvedTemp) -notmatch '^LanguageBubble-msix-[0-9a-f]{32}$') {
+            throw "Refusing cleanup outside the generated packaging directory: $resolvedTemp"
+        }
+        Remove-Item -LiteralPath $resolvedTemp -Recurse -Force
     }
 }
 

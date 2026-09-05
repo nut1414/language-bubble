@@ -106,6 +106,24 @@ git diff -- LanguageBubble/Cargo.toml `
 
 ## Validate and package
 
+The shared version checks are defined in `scripts/release-versions.ps1` and used
+by both entry scripts. Test release behavior in isolated temporary repositories:
+
+```powershell
+.\scripts\test-release.ps1
+```
+
+This checks version agreement, rejected inputs, dry-run behavior, and encoding
+preservation without bumping the working repository or requiring test dependencies.
+CI runs these fixtures and explicit x64/ARM64 release builds. Hosted ARM64 builds
+are cross-compilation checks; on Windows ARM64, run the native tests separately:
+
+```powershell
+Push-Location LanguageBubble
+cargo test --locked --all-targets --target aarch64-pc-windows-msvc
+Pop-Location
+```
+
 Run the same quality checks as CI:
 
 ```powershell

@@ -13,29 +13,7 @@ $cargoTomlPath = Join-Path $repoRoot "LanguageBubble\Cargo.toml"
 $cargoLockPath = Join-Path $repoRoot "LanguageBubble\Cargo.lock"
 $manifestPath = Join-Path $repoRoot "LanguageBubble.Package\Package.appxmanifest"
 
-$cargoPattern = '(?ms)(?<prefix>^\[package\]\s*\r?\n(?:(?!^\[).)*?^version\s*=\s*")(?<version>\d+\.\d+\.\d+)(?<suffix>")'
-$lockPattern = '(?ms)(?<prefix>^\[\[package\]\]\s*\r?\n(?:(?!^\[\[package\]\]).)*?^name\s*=\s*"language-bubble"\s*\r?\n(?:(?!^\[\[package\]\]).)*?^version\s*=\s*")(?<version>\d+\.\d+\.\d+)(?<suffix>")'
-$manifestPattern = '(?s)(?<prefix><Identity\b[^>]*\bVersion=")(?<version>\d+\.\d+\.\d+\.\d+)(?<suffix>")'
-
-function Get-VersionMatch {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$Text,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Pattern,
-
-        [Parameter(Mandatory = $true)]
-        [string]$Description
-    )
-
-    $matches = [regex]::Matches($Text, $Pattern)
-    if ($matches.Count -ne 1) {
-        throw "Expected exactly one $Description version, found $($matches.Count)."
-    }
-
-    return $matches[0]
-}
+. (Join-Path $PSScriptRoot "release-versions.ps1")
 
 function Set-MatchedVersion {
     param(
@@ -110,21 +88,13 @@ $cargoText = $cargoFile.Text
 $lockText = $lockFile.Text
 $manifestText = $manifestFile.Text
 
-$cargoMatch = Get-VersionMatch -Text $cargoText -Pattern $cargoPattern -Description "Cargo package"
-$lockMatch = Get-VersionMatch -Text $lockText -Pattern $lockPattern -Description "Cargo lockfile package"
-$manifestMatch = Get-VersionMatch -Text $manifestText -Pattern $manifestPattern -Description "MSIX manifest"
-
-$currentVersion = $cargoMatch.Groups["version"].Value
-$lockVersion = $lockMatch.Groups["version"].Value
-$manifestVersion = $manifestMatch.Groups["version"].Value
-$expectedManifestVersion = "$currentVersion.0"
-
-if ($lockVersion -ne $currentVersion) {
-    throw "Cargo.toml version '$currentVersion' does not match Cargo.lock version '$lockVersion'."
-}
-if ($manifestVersion -ne $expectedManifestVersion) {
-    throw "Cargo version '$currentVersion' requires MSIX version '$expectedManifestVersion', but the manifest contains '$manifestVersion'."
-}
+$versions = Get-ReleaseVersions -CargoText $cargoText -LockText $lockText -ManifestText $manifestText
+$currentVersion = $versions.Cargo
+$manifestVersion = $versions.Manifest
+$patterns = Get-ReleaseVersionPatterns
+$cargoPattern = $patterns.cargoPattern
+$lockPattern = $patterns.lockPattern
+$manifestPattern = $patterns.manifestPattern
 
 $parts = $currentVersion.Split('.') | ForEach-Object { [int]$_ }
 switch ($Bump) {
