@@ -20,6 +20,7 @@ const CMD_START_WITH_WINDOWS: u16 = 1001;
 const CMD_HIDE_ON_TYPING: u16 = 1002;
 const CMD_EXPANDED_MRU_ONLY: u16 = 1003;
 const CMD_FEEDBACK: u16 = 1004;
+const CMD_HIDE_TRAY_ICON: u16 = 1005;
 
 // Size: 1100-1104
 const CMD_SIZE_BASE: u16 = 1100;
@@ -67,6 +68,7 @@ pub enum TrayCommand {
     ToggleHideOnTyping,
     ToggleExpandedMruOnly,
     Feedback,
+    HideTrayIcon,
     SetSize(BubbleSize),
     SetSwitchMode {
         combo: HookKeyCombo,
@@ -92,6 +94,7 @@ impl TrayCommand {
             Self::ToggleHideOnTyping => CMD_HIDE_ON_TYPING,
             Self::ToggleExpandedMruOnly => CMD_EXPANDED_MRU_ONLY,
             Self::Feedback => CMD_FEEDBACK,
+            Self::HideTrayIcon => CMD_HIDE_TRAY_ICON,
             Self::SetSize(size) => CMD_SIZE_BASE + value_index(&SIZE_VALUES, size)? as u16,
             Self::SetSwitchMode { combo, mode } => {
                 switch_mode_base(combo) + value_index(&SWITCH_MODE_VALUES, mode)? as u16
@@ -118,6 +121,7 @@ impl TrayCommand {
             CMD_HIDE_ON_TYPING => return Some(Self::ToggleHideOnTyping),
             CMD_EXPANDED_MRU_ONLY => return Some(Self::ToggleExpandedMruOnly),
             CMD_FEEDBACK => return Some(Self::Feedback),
+            CMD_HIDE_TRAY_ICON => return Some(Self::HideTrayIcon),
             CMD_CUSTOM_BG_COLOR => return Some(Self::PickCustomBackground),
             CMD_CUSTOM_FG_COLOR => return Some(Self::PickCustomForeground),
             CMD_CHECK_UPDATES_TOGGLE => return Some(Self::ToggleUpdateChecks),
@@ -180,35 +184,60 @@ fn command_id(command: TrayCommand) -> usize {
 pub struct TrayIcon {
     hwnd: HWND,
     h_icon: HICON,
+    visible: bool,
 }
 
 impl TrayIcon {
-    pub fn create(hwnd: HWND) -> Self {
+    pub fn create(hwnd: HWND, visible: bool) -> Self {
         let h_icon = load_embedded_icon().unwrap_or_default();
 
-        let mut nid = NOTIFYICONDATAW {
-            cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
-            hWnd: hwnd,
-            uID: TRAY_ICON_ID,
-            uFlags: NIF_MESSAGE | NIF_TIP | NIF_ICON,
-            uCallbackMessage: WM_TRAY_CALLBACK,
-            hIcon: h_icon,
-            ..Default::default()
+        let mut tray = TrayIcon {
+            hwnd,
+            h_icon,
+            visible: false,
         };
+        if visible {
+            let _ = tray.show();
+        }
+        tray
+    }
 
-        let tip = "Language Bubble";
-        let tip_wide: Vec<u16> = tip.encode_utf16().collect();
-        let len = tip_wide.len().min(nid.szTip.len() - 1);
-        nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
+    pub fn is_visible(&self) -> bool {
+        self.visible
+    }
 
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_ADD, &nid);
+    pub fn show(&mut self) -> bool {
+        if self.visible {
+            return true;
         }
 
-        TrayIcon { hwnd, h_icon }
+        let mut nid = self.notification_data(NIF_MESSAGE | NIF_TIP | NIF_ICON);
+        nid.uCallbackMessage = WM_TRAY_CALLBACK;
+        nid.hIcon = self.h_icon;
+        let added = unsafe { Shell_NotifyIconW(NIM_ADD, &nid).as_bool() };
+        if added {
+            self.visible = true;
+        }
+        added
+    }
+
+    pub fn hide(&mut self) -> bool {
+        if !self.visible {
+            return true;
+        }
+
+        let removed = self.delete_shell_icon();
+        if removed {
+            self.visible = false;
+        }
+        removed
     }
 
     pub fn show_balloon(&self, title: &str, message: &str) {
+        if !self.visible {
+            return;
+        }
+
         let mut nid = NOTIFYICONDATAW {
             cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
@@ -231,25 +260,41 @@ impl TrayIcon {
         }
     }
 
-    pub fn remove(&self) {
+    fn notification_data(&self, flags: NOTIFY_ICON_DATA_FLAGS) -> NOTIFYICONDATAW {
+        let mut nid = NOTIFYICONDATAW {
+            cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
+            hWnd: self.hwnd,
+            uID: TRAY_ICON_ID,
+            uFlags: flags,
+            ..Default::default()
+        };
+        let tip_wide: Vec<u16> = "Language Bubble".encode_utf16().collect();
+        let len = tip_wide.len().min(nid.szTip.len() - 1);
+        nid.szTip[..len].copy_from_slice(&tip_wide[..len]);
+        nid
+    }
+
+    fn delete_shell_icon(&self) -> bool {
         let nid = NOTIFYICONDATAW {
             cbSize: mem::size_of::<NOTIFYICONDATAW>() as u32,
             hWnd: self.hwnd,
             uID: TRAY_ICON_ID,
             ..Default::default()
         };
-        unsafe {
-            let _ = Shell_NotifyIconW(NIM_DELETE, &nid);
-            if !self.h_icon.is_invalid() {
-                let _ = DestroyIcon(self.h_icon);
-            }
-        }
+        unsafe { Shell_NotifyIconW(NIM_DELETE, &nid).as_bool() }
     }
 }
 
 impl Drop for TrayIcon {
     fn drop(&mut self) {
-        self.remove();
+        if self.visible {
+            let _ = self.delete_shell_icon();
+        }
+        unsafe {
+            if !self.h_icon.is_invalid() {
+                let _ = DestroyIcon(self.h_icon);
+            }
+        }
     }
 }
 
@@ -531,6 +576,16 @@ pub fn show_context_menu(hwnd: HWND, snapshot: &TrayMenuSnapshot) -> Option<Tray
 
         let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
 
+        // Hide tray icon
+        let _ = AppendMenuW(
+            menu,
+            MF_STRING,
+            command_id(TrayCommand::HideTrayIcon),
+            w!("Hide tray icon..."),
+        );
+
+        let _ = AppendMenuW(menu, MF_SEPARATOR, 0, None);
+
         // Feedback
         let _ = AppendMenuW(
             menu,
@@ -645,6 +700,7 @@ mod tests {
             TrayCommand::ToggleHideOnTyping,
             TrayCommand::ToggleExpandedMruOnly,
             TrayCommand::Feedback,
+            TrayCommand::HideTrayIcon,
             TrayCommand::PickCustomBackground,
             TrayCommand::PickCustomForeground,
             TrayCommand::ToggleUpdateChecks,
@@ -687,6 +743,7 @@ mod tests {
             (TrayCommand::ToggleHideOnTyping, 1002),
             (TrayCommand::ToggleExpandedMruOnly, 1003),
             (TrayCommand::Feedback, 1004),
+            (TrayCommand::HideTrayIcon, 1005),
             (TrayCommand::PickCustomBackground, 1410),
             (TrayCommand::PickCustomForeground, 1411),
             (TrayCommand::ToggleUpdateChecks, 1503),
@@ -732,7 +789,7 @@ mod tests {
         for id in [
             0,
             999,
-            1005,
+            1006,
             1099,
             1105,
             1299,

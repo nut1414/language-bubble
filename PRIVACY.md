@@ -38,7 +38,7 @@ Language Bubble uses Windows UI Automation and Accessibility APIs to determine t
 
 ### User Preferences
 
-Your settings (display mode, size, key bindings, start with Windows) are stored locally in the Windows Registry under `HKEY_CURRENT_USER\Software\LanguageBubble`. These settings remain on your device and are never transmitted.
+Your settings (display mode, size, key bindings, start with Windows, and tray-icon visibility) are stored locally in the Windows Registry under `HKEY_CURRENT_USER\Software\LanguageBubble`. These settings remain on your device and are never transmitted.
 
 ### System Theme
 
