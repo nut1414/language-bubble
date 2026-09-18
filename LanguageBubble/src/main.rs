@@ -18,7 +18,7 @@ use std::mem;
 
 use windows::Win32::Foundation::*;
 use windows::Win32::System::Com::*;
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
 use windows::core::*;
 
@@ -28,6 +28,7 @@ use types::*;
 
 const MSG_WINDOW_CLASS: PCWSTR = w!("LanguageBubbleMsgWindow");
 const MUTEX_NAME: PCWSTR = w!("Global\\LanguageBubble_SingleInstance");
+const SHOW_TRAY_EVENT_NAME: PCWSTR = w!("Global\\LanguageBubble_ShowTray");
 const WM_SETTINGCHANGE: u32 = 0x001A;
 const DPI_AWARENESS_CONTEXT_PMV2: isize = -4;
 
@@ -36,7 +37,7 @@ struct AppState {
     settings: settings::UserSettingsStore,
     language_service: language::LanguageService,
     bubble: bubble::BubbleWindow,
-    _tray: tray::TrayIcon,
+    tray: tray::TrayIcon,
     bindings: KeyBindings,
     hide_on_typing: bool,
     expanded_mru_only: bool,
@@ -159,6 +160,11 @@ fn run() -> Result<()> {
     // COM initialization for UI Automation
     let _com_apartment = ComApartment::initialize()?;
 
+    // The named event lets secondary launches ask the primary instance to
+    // restore its tray icon without finding or creating another window.
+    let show_tray_event_result =
+        unsafe { CreateEventW(None, false, false, SHOW_TRAY_EVENT_NAME) }.map(OwnedHandle);
+
     // Single-instance check
     let (mutex, already_running) = unsafe {
         let handle = CreateMutexW(None, true, MUTEX_NAME)?;
@@ -167,16 +173,19 @@ fn run() -> Result<()> {
     };
     let _mutex = mutex;
     if already_running {
-        unsafe {
-            let _ = MessageBoxW(
-                None,
-                w!("Language Bubble is already running."),
-                w!("Language Bubble"),
-                MB_OK | MB_ICONINFORMATION,
-            );
+        match show_tray_event_result {
+            Ok(show_tray_event) => {
+                if let Err(error) = unsafe { SetEvent(show_tray_event.0) } {
+                    settings::report_result("signal existing instance", Err(error));
+                }
+            }
+            Err(error) => {
+                settings::report_result("open existing-instance signal", Err(error));
+            }
         }
         return Ok(());
     }
+    let show_tray_event = show_tray_event_result?;
 
     let settings_store = settings::UserSettingsStore::registry();
     settings::report_result(
@@ -193,6 +202,7 @@ fn run() -> Result<()> {
     let expanded_mru_only = settings_store.expanded_mru_only();
     let theme_mode = settings_store.theme_mode();
     let custom_colors = settings_store.custom_theme_colors();
+    let tray_icon_hidden = settings_store.tray_icon_hidden();
 
     // Restore pending update from registry (if any)
     let pending_update = update::pending_from_registry(settings_store);
@@ -215,11 +225,13 @@ fn run() -> Result<()> {
     bubble_win.set_custom_colors(custom_colors);
 
     // Tray icon
-    let tray_icon = tray::TrayIcon::create(msg_hwnd);
-    tray_icon.show_balloon(
-        "Language Bubble",
-        "Running in the system tray. Right-click the tray icon to configure.",
-    );
+    let tray_icon = tray::TrayIcon::create(msg_hwnd, !tray_icon_hidden);
+    if tray_icon.is_visible() {
+        tray_icon.show_balloon(
+            "Language Bubble",
+            "Running in the system tray. Right-click the tray icon to configure.",
+        );
+    }
 
     // Check for updates (non-MSIX only)
     if !settings::is_msix_packaged() && settings_store.check_for_updates() {
@@ -248,7 +260,7 @@ fn run() -> Result<()> {
             settings: settings_store,
             language_service,
             bubble: bubble_win,
-            _tray: tray_icon,
+            tray: tray_icon,
             bindings,
             hide_on_typing,
             expanded_mru_only,
@@ -262,17 +274,33 @@ fn run() -> Result<()> {
 
     // Message loop
     let message_loop_result = unsafe {
-        let mut msg = MSG::default();
-        loop {
-            let status = GetMessageW(&mut msg, None, 0, 0).0;
-            if status == -1 {
-                break Err(Error::from_win32());
+        let handles = [show_tray_event.0];
+        'message_loop: loop {
+            let wait = MsgWaitForMultipleObjectsEx(
+                Some(&handles),
+                INFINITE,
+                QS_ALLINPUT,
+                MWMO_INPUTAVAILABLE,
+            );
+
+            if wait.0 == WAIT_OBJECT_0.0 {
+                on_show_tray_requested();
+                continue;
             }
-            if status == 0 {
-                break Ok(());
+
+            if wait.0 == WAIT_OBJECT_0.0 + handles.len() as u32 {
+                let mut msg = MSG::default();
+                while PeekMessageW(&mut msg, None, 0, 0, PM_REMOVE).as_bool() {
+                    if msg.message == WM_QUIT {
+                        break 'message_loop Ok(());
+                    }
+                    let _ = TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                continue;
             }
-            let _ = TranslateMessage(&msg);
-            DispatchMessageW(&msg);
+
+            break Err(Error::from_win32());
         }
     };
 
@@ -407,13 +435,24 @@ fn on_update_available() {
         };
         state.pending_update = Some(version.clone());
         state
-            ._tray
+            .tray
             .show_balloon("Language Bubble", &format!("Update available: {}", version));
     });
     if handled.is_none() {
         // The pending version remains in the mutex until AppState is available.
         DEFERRED_UPDATE.with(|pending| pending.set(true));
     }
+}
+
+fn on_show_tray_requested() {
+    with_app(|state| {
+        if state.tray.show() {
+            settings::report_result(
+                "save tray icon visibility",
+                state.settings.save_tray_icon_hidden(false),
+            );
+        }
+    });
 }
 
 /// Returns whether `lparam` names the Windows immersive color setting.
@@ -533,6 +572,21 @@ fn on_tray_right_click(hwnd: HWND) {
 }
 
 fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
+    if matches!(cmd, tray::TrayCommand::HideTrayIcon) && confirm_hide_tray_icon(hwnd) {
+        with_app(|state| {
+            if state.tray.hide() {
+                settings::report_result(
+                    "save tray icon visibility",
+                    state.settings.save_tray_icon_hidden(true),
+                );
+            }
+        });
+        return;
+    }
+    if matches!(cmd, tray::TrayCommand::HideTrayIcon) {
+        return;
+    }
+
     match cmd {
         tray::TrayCommand::PickCustomBackground => {
             let initial = with_app(|state| state.custom_colors.bg_color).unwrap_or(0);
@@ -660,7 +714,21 @@ fn handle_menu_command(hwnd: HWND, cmd: tray::TrayCommand) {
         tray::TrayCommand::PickCustomBackground | tray::TrayCommand::PickCustomForeground => {
             unreachable!()
         }
+        tray::TrayCommand::HideTrayIcon => unreachable!(),
     });
+}
+
+fn confirm_hide_tray_icon(hwnd: HWND) -> bool {
+    unsafe {
+        MessageBoxW(
+            Some(hwnd),
+            w!(
+                "Language Bubble will continue running after the tray icon is hidden.\n\nTo show the tray icon again, launch Language Bubble again."
+            ),
+            w!("Language Bubble"),
+            MB_OKCANCEL | MB_ICONINFORMATION,
+        ) == IDOK
+    }
 }
 
 fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {

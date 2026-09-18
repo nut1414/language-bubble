@@ -147,6 +147,15 @@ impl<B: SettingsBackend> SettingsStore<B> {
             .write_string("HideOnTyping", bool_string(enabled))
     }
 
+    pub fn tray_icon_hidden(&self) -> bool {
+        self.read_string("TrayIconHidden").as_deref() == Some("True")
+    }
+
+    pub fn save_tray_icon_hidden(&self, hidden: bool) -> Result<()> {
+        self.backend
+            .write_string("TrayIconHidden", bool_string(hidden))
+    }
+
     pub fn expanded_mru_only(&self) -> bool {
         self.read_string("ExpandedMruOnly").as_deref() == Some("True")
     }
@@ -459,13 +468,20 @@ mod tests {
         assert_eq!(store.bubble_size(), BubbleSize::Medium);
         assert_eq!(store.theme_mode(), ThemeMode::System);
         assert!(store.check_for_updates());
+        assert!(!store.tray_icon_hidden());
         assert_eq!(store.load_key_bindings(), KeyBindings::default());
 
         backend.write_string("Size", "invalid").unwrap();
         backend.write_string("ThemeMode", "invalid").unwrap();
         backend.write_string("CapsLockMode", "invalid").unwrap();
+        backend.write_string("TrayIconHidden", "invalid").unwrap();
         assert_eq!(store.bubble_size(), BubbleSize::Medium);
         assert_eq!(store.theme_mode(), ThemeMode::System);
+        assert!(!store.tray_icon_hidden());
+        backend.write_string("TrayIconHidden", "True").unwrap();
+        assert!(store.tray_icon_hidden());
+        backend.write_string("TrayIconHidden", "False").unwrap();
+        assert!(!store.tray_icon_hidden());
         assert_eq!(
             store
                 .load_key_bindings()
@@ -481,6 +497,8 @@ mod tests {
         let store = SettingsStore::new(backend.clone());
         store.save_bubble_size(BubbleSize::Large).unwrap();
         store.save_hide_on_typing(true).unwrap();
+        store.save_tray_icon_hidden(true).unwrap();
+        store.save_tray_icon_hidden(false).unwrap();
         store.save_expanded_mru_only(true).unwrap();
         store.save_theme_mode(ThemeMode::Custom).unwrap();
         store
@@ -502,6 +520,7 @@ mod tests {
 
         assert_eq!(backend.value("Size").as_deref(), Some("Large"));
         assert_eq!(backend.value("HideOnTyping").as_deref(), Some("True"));
+        assert_eq!(backend.value("TrayIconHidden").as_deref(), Some("False"));
         assert_eq!(backend.value("ExpandedMruOnly").as_deref(), Some("True"));
         assert_eq!(backend.value("ThemeMode").as_deref(), Some("Custom"));
         assert_eq!(backend.value("CustomBG").as_deref(), Some("112233"));
