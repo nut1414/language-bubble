@@ -169,10 +169,13 @@ git push origin main v0.5.0
 
 The repository uses lightweight tags, so do not substitute
 `git push --follow-tags`; that option only automatically includes annotated
-tags. Pushing the tag triggers the GitHub release workflow.
+tags. Pushing the tag triggers the GitHub release workflow. The workflow
+publishes the x64 and ARM64 executables, architecture-specific MSIX packages,
+and the MSIX bundle as release assets.
 
-The local `.msixbundle` is the package intended for later manual Store review.
-Neither local script performs any network upload or Partner Center action.
+The `.msixbundle` is the package intended for later manual Store review. The
+local script does not perform any network upload, and neither the script nor
+the workflow submits anything to Partner Center.
 
 The scripts deliberately preserve the repository's existing `0.x.y` version
 style. Current Microsoft Store validation may require a nonzero first MSIX

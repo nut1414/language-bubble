@@ -322,6 +322,12 @@ function Test-MsixBundle {
             throw "Package '$($innerPackage.Name)' has version '$($identity.Version)', expected '$StoreVersion'."
         }
 
+        $resourceLanguages = @($innerManifest.Package.Resources.Resource |
+            ForEach-Object { $_.Language })
+        if ($resourceLanguages.Count -ne 1 -or $resourceLanguages[0] -ne "en-US") {
+            throw "Package '$($innerPackage.Name)' must declare en-US as its default resource language."
+        }
+
         $architecture = $identity.ProcessorArchitecture.ToLowerInvariant()
         if ($architecture -notin @("x64", "arm64")) {
             throw "Package '$($innerPackage.Name)' has unexpected architecture '$architecture'."
@@ -360,12 +366,17 @@ $storeVersion = "$cargoVersion.0"
 [xml]$sourceManifest = $manifestText
 $expectedIdentityName = $sourceManifest.Package.Identity.Name
 $expectedPublisher = $sourceManifest.Package.Identity.Publisher
+$sourceResourceLanguages = @($sourceManifest.Package.Resources.Resource |
+    ForEach-Object { $_.Language })
 
 if ($lockVersion -ne $cargoVersion) {
     throw "Cargo.toml version '$cargoVersion' does not match Cargo.lock version '$lockVersion'."
 }
 if ($manifestVersion -ne $storeVersion) {
     throw "Cargo version '$cargoVersion' requires MSIX version '$storeVersion', but the manifest contains '$manifestVersion'."
+}
+if ($sourceResourceLanguages.Count -ne 1 -or $sourceResourceLanguages[0] -ne "en-US") {
+    throw "The MSIX manifest must declare en-US as its default resource language."
 }
 
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
