@@ -1,5 +1,7 @@
-use crate::caret::ScreenPoint;
+use crate::caret::{CaretQuality, ScreenPoint, ScreenRect};
 use crate::types::{DisplayMode, SizeMetrics};
+
+const ESTIMATED_LINE_HEIGHT_DIP: f32 = 20.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PixelPoint {
@@ -25,6 +27,7 @@ pub struct WorkArea {
 pub struct PlacementContext {
     pub caret: ScreenPoint,
     pub work_area: WorkArea,
+    pub foreground_bottom: Option<i32>,
     pub window_size: PixelSize,
     pub dpi_scale: f32,
     pub metrics: SizeMetrics,
@@ -129,6 +132,15 @@ pub fn calculate_window_size(
 pub fn place_at_caret(context: PlacementContext, anchor: CaretAnchor) -> PixelPoint {
     let margin = (10.0 * context.dpi_scale) as i32;
     let caret_offset = (4.0 * context.dpi_scale) as i32;
+    let unreliable_caret = context.caret.quality == CaretQuality::Unreliable;
+    let field_fallback = context.caret.quality.is_field_fallback();
+    let element = context.caret.element_rect.filter(|_| field_fallback);
+    let bottom_limit = context
+        .foreground_bottom
+        .filter(|bottom| field_fallback && *bottom > context.work_area.top)
+        .map_or(context.work_area.bottom, |bottom| {
+            bottom.min(context.work_area.bottom)
+        });
     let mut x = match anchor {
         CaretAnchor::Center => context.caret.x - context.window_size.width / 2,
         CaretAnchor::SelectedItem(selected) => {
@@ -138,7 +150,19 @@ pub fn place_at_caret(context: PlacementContext, anchor: CaretAnchor) -> PixelPo
             context.caret.x - (selected_center_dip * context.dpi_scale) as i32
         }
     };
-    let mut y = context.caret.y + caret_offset;
+    let below = if unreliable_caret {
+        element.map(|rect| rect.bottom).unwrap_or_else(|| {
+            context.caret.caret_top + (ESTIMATED_LINE_HEIGHT_DIP * context.dpi_scale) as i32
+        }) + caret_offset
+    } else {
+        context.caret.y + caret_offset
+    };
+    let above = element
+        .map(|rect| rect.top)
+        .unwrap_or(context.caret.caret_top)
+        - context.window_size.height
+        - caret_offset;
+    let fits_below = |y| y + context.window_size.height <= bottom_limit - margin;
 
     if x + context.window_size.width > context.work_area.right - margin {
         x = context.work_area.right - context.window_size.width - margin;
@@ -146,14 +170,32 @@ pub fn place_at_caret(context: PlacementContext, anchor: CaretAnchor) -> PixelPo
     if x < context.work_area.left + margin {
         x = context.work_area.left + margin;
     }
-    if y + context.window_size.height > context.work_area.bottom - margin {
-        y = context.caret.caret_top - context.window_size.height - caret_offset;
-    }
-    if y < context.work_area.top + margin {
-        y = context.work_area.top + margin;
+    let mut y = if fits_below(below) { below } else { above };
+
+    if let Some(element_rect) = element
+        && rectangles_overlap(x, y, context.window_size, element_rect)
+    {
+        let below_element = element_rect.bottom + caret_offset;
+        y = if fits_below(below_element) {
+            below_element
+        } else {
+            above
+        };
     }
 
-    PixelPoint { x, y }
+    PixelPoint {
+        x,
+        y: y.max(context.work_area.top + margin),
+    }
+}
+
+fn rectangles_overlap(x: i32, y: i32, size: PixelSize, rect: ScreenRect) -> bool {
+    let right = x as i64 + size.width as i64;
+    let bottom = y as i64 + size.height as i64;
+    right > rect.left as i64
+        && (x as i64) < rect.right as i64
+        && bottom > rect.top as i64
+        && (y as i64) < rect.bottom as i64
 }
 
 pub fn center_in_work_area(work_area: WorkArea, window_size: PixelSize) -> PixelPoint {
@@ -170,6 +212,16 @@ mod tests {
     use super::*;
     use crate::types::BubbleSize;
 
+    fn reliable_caret(x: i32, y: i32, caret_top: i32) -> ScreenPoint {
+        ScreenPoint {
+            x,
+            y,
+            caret_top,
+            quality: CaretQuality::Reliable,
+            element_rect: None,
+        }
+    }
+
     fn context(
         caret: ScreenPoint,
         work_area: WorkArea,
@@ -179,6 +231,7 @@ mod tests {
         PlacementContext {
             caret,
             work_area,
+            foreground_bottom: None,
             window_size,
             dpi_scale,
             metrics: BubbleSize::Medium.metrics(),
@@ -215,10 +268,67 @@ mod tests {
     fn caret_placement_centers_below_the_caret() {
         let point = place_at_caret(
             context(
+                reliable_caret(500, 400, 380),
+                WorkArea {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                PixelSize {
+                    width: 100,
+                    height: 40,
+                },
+                1.0,
+            ),
+            CaretAnchor::Center,
+        );
+        assert_eq!(point, PixelPoint { x: 450, y: 404 });
+    }
+
+    #[test]
+    fn tiny_caret_uses_element_bottom_without_changing_x() {
+        let point = place_at_caret(
+            context(
                 ScreenPoint {
                     x: 500,
-                    y: 400,
+                    y: 382,
                     caret_top: 380,
+                    quality: CaretQuality::Unreliable,
+                    element_rect: Some(ScreenRect {
+                        left: 450,
+                        top: 380,
+                        right: 550,
+                        bottom: 420,
+                    }),
+                },
+                WorkArea {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                PixelSize {
+                    width: 100,
+                    height: 40,
+                },
+                1.0,
+            ),
+            CaretAnchor::Center,
+        );
+        assert_eq!(point, PixelPoint { x: 450, y: 424 });
+    }
+
+    #[test]
+    fn tiny_caret_without_element_bounds_uses_estimated_line_height() {
+        let point = place_at_caret(
+            context(
+                ScreenPoint {
+                    x: 500,
+                    y: 382,
+                    caret_top: 380,
+                    quality: CaretQuality::Unreliable,
+                    element_rect: None,
                 },
                 WorkArea {
                     left: 0,
@@ -238,6 +348,75 @@ mod tests {
     }
 
     #[test]
+    fn tiny_caret_flips_above_element_at_work_area_bottom() {
+        let point = place_at_caret(
+            context(
+                ScreenPoint {
+                    x: 500,
+                    y: 1002,
+                    caret_top: 1000,
+                    quality: CaretQuality::Unreliable,
+                    element_rect: Some(ScreenRect {
+                        left: 450,
+                        top: 1000,
+                        right: 550,
+                        bottom: 1040,
+                    }),
+                },
+                WorkArea {
+                    left: 0,
+                    top: 0,
+                    right: 1920,
+                    bottom: 1080,
+                },
+                PixelSize {
+                    width: 100,
+                    height: 40,
+                },
+                1.0,
+            ),
+            CaretAnchor::Center,
+        );
+        assert_eq!(point, PixelPoint { x: 450, y: 956 });
+    }
+
+    #[test]
+    fn field_fallback_stays_within_a_floating_app_window() {
+        for quality in [CaretQuality::Unreliable, CaretQuality::EditFallback] {
+            let mut placement = context(
+                ScreenPoint {
+                    x: 60,
+                    y: 715,
+                    caret_top: 713,
+                    quality,
+                    element_rect: Some(ScreenRect {
+                        left: 40,
+                        top: 713,
+                        right: 600,
+                        bottom: 894,
+                    }),
+                },
+                WorkArea {
+                    left: 0,
+                    top: 0,
+                    right: 1200,
+                    bottom: 978,
+                },
+                PixelSize {
+                    width: 64,
+                    height: 55,
+                },
+                1.0,
+            );
+            placement.foreground_bottom = Some(894);
+            assert_eq!(
+                place_at_caret(placement, CaretAnchor::Center),
+                PixelPoint { x: 28, y: 654 }
+            );
+        }
+    }
+
+    #[test]
     fn caret_placement_clamps_every_screen_edge() {
         let work_area = WorkArea {
             left: 0,
@@ -251,64 +430,28 @@ mod tests {
         };
         assert_eq!(
             place_at_caret(
-                context(
-                    ScreenPoint {
-                        x: 0,
-                        y: 400,
-                        caret_top: 380,
-                    },
-                    work_area,
-                    size,
-                    1.0,
-                ),
+                context(reliable_caret(0, 400, 380), work_area, size, 1.0,),
                 CaretAnchor::Center,
             ),
             PixelPoint { x: 10, y: 404 }
         );
         assert_eq!(
             place_at_caret(
-                context(
-                    ScreenPoint {
-                        x: 1900,
-                        y: 400,
-                        caret_top: 380,
-                    },
-                    work_area,
-                    size,
-                    1.0,
-                ),
+                context(reliable_caret(1900, 400, 380), work_area, size, 1.0,),
                 CaretAnchor::Center,
             ),
             PixelPoint { x: 1810, y: 404 }
         );
         assert_eq!(
             place_at_caret(
-                context(
-                    ScreenPoint {
-                        x: 500,
-                        y: 1075,
-                        caret_top: 1055,
-                    },
-                    work_area,
-                    size,
-                    1.0,
-                ),
+                context(reliable_caret(500, 1075, 1055), work_area, size, 1.0,),
                 CaretAnchor::Center,
             ),
             PixelPoint { x: 450, y: 1011 }
         );
         assert_eq!(
             place_at_caret(
-                context(
-                    ScreenPoint {
-                        x: 500,
-                        y: 2,
-                        caret_top: 0,
-                    },
-                    work_area,
-                    size,
-                    1.0,
-                ),
+                context(reliable_caret(500, 2, 0), work_area, size, 1.0,),
                 CaretAnchor::Center,
             ),
             PixelPoint { x: 450, y: 10 }
@@ -319,11 +462,7 @@ mod tests {
     fn selected_item_anchor_uses_scaled_item_center() {
         let point = place_at_caret(
             context(
-                ScreenPoint {
-                    x: 500,
-                    y: 400,
-                    caret_top: 380,
-                },
+                reliable_caret(500, 400, 380),
                 WorkArea {
                     left: 0,
                     top: 0,
@@ -359,16 +498,7 @@ mod tests {
         );
         assert_eq!(
             place_at_caret(
-                context(
-                    ScreenPoint {
-                        x: -1800,
-                        y: 400,
-                        caret_top: 380,
-                    },
-                    work_area,
-                    size,
-                    1.0,
-                ),
+                context(reliable_caret(-1800, 400, 380), work_area, size, 1.0,),
                 CaretAnchor::Center,
             ),
             PixelPoint { x: -1850, y: 404 }
@@ -379,11 +509,7 @@ mod tests {
     fn oversized_window_keeps_existing_clamp_order() {
         let point = place_at_caret(
             context(
-                ScreenPoint {
-                    x: 50,
-                    y: 50,
-                    caret_top: 30,
-                },
+                reliable_caret(50, 50, 30),
                 WorkArea {
                     left: 0,
                     top: 0,

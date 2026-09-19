@@ -83,46 +83,8 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.exe
 
-  msix:
-    needs: build
-    runs-on: windows-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: LanguageBubble-win-x64
-          path: artifacts/x64
-
-      - uses: actions/download-artifact@v4
-        with:
-          name: LanguageBubble-win-arm64
-          path: artifacts/arm64
-
-      - name: Prepare release executables
-        shell: pwsh
-        run: |
-          New-Item -ItemType Directory -Force -Path `
-            'LanguageBubble/target/x86_64-pc-windows-msvc/release', `
-            'LanguageBubble/target/aarch64-pc-windows-msvc/release' | Out-Null
-          Copy-Item 'artifacts/x64/LanguageBubble-win-x64.exe' `
-            'LanguageBubble/target/x86_64-pc-windows-msvc/release/language-bubble.exe'
-          Copy-Item 'artifacts/arm64/LanguageBubble-win-arm64.exe' `
-            'LanguageBubble/target/aarch64-pc-windows-msvc/release/language-bubble.exe'
-
-      - name: Package and validate MSIX
-        shell: pwsh
-        run: ./scripts/package-msix.ps1 -SkipBuild
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: LanguageBubble-msix
-          path: |
-            release/*.msix
-            release/*.msixbundle
-
   release:
-    needs: msix
+    needs: build
     runs-on: ubuntu-latest
     permissions:
       contents: write
