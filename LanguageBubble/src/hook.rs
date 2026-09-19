@@ -10,10 +10,26 @@ use windows::core::{Error, HRESULT, Result};
 
 use crate::types::*;
 
+mod win_space;
+#[cfg(feature = "win-space-trace")]
+mod win_space_trace;
+
+use win_space::{WinKey, WinSpaceEvent, WinSpaceState};
+#[cfg(feature = "win-space-trace")]
+use win_space_trace::{
+    TraceAction, TraceDisposition, TraceInjection, TraceInput, TraceKey, WinSpaceTraceBuffer,
+    WinSpaceTraceRecord,
+};
+#[cfg(feature = "win-space-trace")]
+pub use win_space_trace::{WinSpaceTraceDrain, WinSpaceTraceFile};
+
 /// Custom message posted to the main window when a switch key is pressed.
 pub const WM_SWITCH_KEY: u32 = WM_APP + 1;
 /// Custom message posted to the main window when any key is pressed.
 pub const WM_ANY_KEY: u32 = WM_APP + 2;
+/// Custom message posted when diagnostic Win+Space records are ready to flush.
+#[cfg(feature = "win-space-trace")]
+pub const WM_WIN_SPACE_TRACE: u32 = WM_APP + 3;
 
 const SELF_INJECTED_TAG: usize = 0x4C42;
 const VK_CAPITAL_U16: u16 = 0x14;
@@ -25,14 +41,14 @@ static SUPPRESS_SELF: AtomicBool = AtomicBool::new(false);
 struct HookState {
     target_hwnd: HWND,
     bindings: KeyBindings,
-    win_held: bool,
-    win_used_for_combo: bool,
+    win_space: WinSpaceState,
     alt_held: bool,
     shift_held: bool,
-    space_held: bool,
     caps_held: bool,
     alt_shift_primed: bool,
     alt_shift_consumed: bool,
+    #[cfg(feature = "win-space-trace")]
+    win_space_trace: WinSpaceTraceBuffer,
 }
 
 impl HookState {
@@ -40,14 +56,14 @@ impl HookState {
         Self {
             target_hwnd,
             bindings,
-            win_held: false,
-            win_used_for_combo: false,
+            win_space: WinSpaceState::default(),
             alt_held: false,
             shift_held: false,
-            space_held: false,
             caps_held: false,
             alt_shift_primed: false,
             alt_shift_consumed: false,
+            #[cfg(feature = "win-space-trace")]
+            win_space_trace: WinSpaceTraceBuffer::default(),
         }
     }
 
@@ -55,12 +71,16 @@ impl HookState {
         self.bindings.set_switch_mode(combo, mode);
     }
 
-    fn release_captured_space(&mut self, vk: u16, is_up: bool) -> bool {
-        if vk == VK_SPACE.0 && is_up && self.space_held {
-            self.space_held = false;
-            true
-        } else {
-            false
+    #[cfg(feature = "win-space-trace")]
+    fn record_win_space_trace(&mut self, record: WinSpaceTraceRecord) {
+        self.win_space_trace.push(record);
+        unsafe {
+            let _ = PostMessageW(
+                Some(self.target_hwnd),
+                WM_WIN_SPACE_TRACE,
+                WPARAM(0),
+                LPARAM(0),
+            );
         }
     }
 }
@@ -96,6 +116,11 @@ impl InstalledHook {
     pub fn set_mode(&mut self, combo: HookKeyCombo, mode: SwitchMode) {
         self.state.set_mode(combo, mode);
     }
+
+    #[cfg(feature = "win-space-trace")]
+    pub fn drain_win_space_trace(&mut self) -> WinSpaceTraceDrain {
+        self.state.win_space_trace.drain()
+    }
 }
 
 impl Drop for InstalledHook {
@@ -124,67 +149,136 @@ unsafe extern "system" fn hook_proc(code: i32, wparam: WPARAM, lparam: LPARAM) -
         };
         let state = ptr.as_mut();
 
-        if SUPPRESS_SELF.load(Ordering::SeqCst) {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-
         let kbd = &*(lparam.0 as *const KBDLLHOOKSTRUCT);
-
-        // Skip self-injected events
-        if kbd.dwExtraInfo == SELF_INJECTED_TAG {
-            return CallNextHookEx(None, code, wparam, lparam);
-        }
-
         let vk = kbd.vkCode as u16;
         let is_down = wparam.0 == WM_KEYDOWN as usize || wparam.0 == WM_SYSKEYDOWN as usize;
         let is_up = wparam.0 == WM_KEYUP as usize || wparam.0 == WM_SYSKEYUP as usize;
+        let interception_enabled =
+            state.bindings.get(HookKeyCombo::WinSpace).switch_mode != SwitchMode::Unused;
 
-        // The captured Space key-up must be consumed even if Win was released
-        // first or the binding changed while the keys were held.
-        if state.release_captured_space(vk, is_up) {
-            return LRESULT(1);
-        }
+        #[cfg(feature = "win-space-trace")]
+        let trace_record = trace_key(vk).map(|key| {
+            WinSpaceTraceRecord::new(
+                TraceInput {
+                    keyboard_time_ms: kbd.time,
+                    key,
+                    action: trace_action(is_down, is_up),
+                    flags: kbd.flags.0,
+                    injected: kbd.flags.0 & LLKHF_INJECTED.0 != 0,
+                    self_injected: kbd.dwExtraInfo == SELF_INJECTED_TAG,
+                },
+                interception_enabled,
+                state.win_space.snapshot(),
+            )
+        });
 
-        // --- Windows key ---
-        if vk == VK_LWIN.0 || vk == VK_RWIN.0 {
-            if is_down {
-                state.win_held = true;
-                state.win_used_for_combo = false;
-            } else if is_up {
-                state.win_held = false;
-                if state.win_used_for_combo {
-                    state.win_used_for_combo = false;
-                    // Suppress real Win key-up, inject Ctrl tap + synthetic Win up
-                    // to prevent Start menu from opening
-                    if inject_win_combo_release(vk) {
-                        return LRESULT(1);
-                    }
-                }
-            }
+        if SUPPRESS_SELF.load(Ordering::SeqCst) {
+            #[cfg(feature = "win-space-trace")]
+            finish_trace(
+                state,
+                trace_record,
+                None,
+                TraceDisposition::SkippedSelfSuppression,
+                TraceInjection::default(),
+            );
             return CallNextHookEx(None, code, wparam, lparam);
         }
 
-        // --- Space (when Win held) ---
-        if vk == VK_SPACE.0
-            && state.win_held
-            && state.bindings.get(HookKeyCombo::WinSpace).switch_mode != SwitchMode::Unused
-        {
-            if is_down && !state.space_held {
-                state.space_held = true;
-                state.win_used_for_combo = true;
-                if state.alt_held && state.shift_held {
-                    state.alt_shift_consumed = true;
+        // Skip self-injected events
+        if kbd.dwExtraInfo == SELF_INJECTED_TAG {
+            #[cfg(feature = "win-space-trace")]
+            finish_trace(
+                state,
+                trace_record,
+                None,
+                TraceDisposition::SkippedSelfInjected,
+                TraceInjection::default(),
+            );
+            return CallNextHookEx(None, code, wparam, lparam);
+        }
+
+        // --- Win + Space ---
+        let win_space_event = match vk {
+            v if v == VK_LWIN.0 && is_down => Some(WinSpaceEvent::WinDown(WinKey::Left)),
+            v if v == VK_LWIN.0 && is_up => Some(WinSpaceEvent::WinUp(WinKey::Left)),
+            v if v == VK_RWIN.0 && is_down => Some(WinSpaceEvent::WinDown(WinKey::Right)),
+            v if v == VK_RWIN.0 && is_up => Some(WinSpaceEvent::WinUp(WinKey::Right)),
+            v if v == VK_SPACE.0 && is_down => Some(WinSpaceEvent::SpaceDown),
+            v if v == VK_SPACE.0 && is_up => Some(WinSpaceEvent::SpaceUp),
+            _ => None,
+        };
+
+        if let Some(event) = win_space_event {
+            if let Some(decision) = state.win_space.handle(event, interception_enabled) {
+                if decision.switch_layout {
+                    if state.alt_held && state.shift_held {
+                        state.alt_shift_consumed = true;
+                    }
+                    let _ = PostMessageW(
+                        Some(state.target_hwnd),
+                        WM_SWITCH_KEY,
+                        WPARAM(HookKeyCombo::WinSpace as usize),
+                        LPARAM(0),
+                    );
                 }
-                let _ = PostMessageW(
-                    Some(state.target_hwnd),
-                    WM_SWITCH_KEY,
-                    WPARAM(HookKeyCombo::WinSpace as usize),
-                    LPARAM(0),
+
+                if decision.neutralize_start {
+                    // Suppress the real Win key-up only when the full Ctrl tap
+                    // and synthetic Win-up sequence was injected successfully.
+                    let injection = inject_win_combo_release(vk);
+                    #[cfg(feature = "win-space-trace")]
+                    finish_trace(
+                        state,
+                        trace_record,
+                        Some(decision),
+                        if injection.complete() {
+                            TraceDisposition::Neutralized
+                        } else {
+                            TraceDisposition::NeutralizationFailed
+                        },
+                        injection.into(),
+                    );
+                    if injection.complete() {
+                        return LRESULT(1);
+                    }
+                    return CallNextHookEx(None, code, wparam, lparam);
+                }
+
+                #[cfg(feature = "win-space-trace")]
+                finish_trace(
+                    state,
+                    trace_record,
+                    Some(decision),
+                    if decision.suppress {
+                        TraceDisposition::Suppressed
+                    } else {
+                        TraceDisposition::Passed
+                    },
+                    TraceInjection::default(),
                 );
-            } else if is_up {
-                state.space_held = false;
+                if decision.suppress {
+                    return LRESULT(1);
+                }
+                return CallNextHookEx(None, code, wparam, lparam);
             }
-            return LRESULT(1); // Suppress both down and up
+
+            #[cfg(feature = "win-space-trace")]
+            finish_trace(
+                state,
+                trace_record,
+                None,
+                TraceDisposition::Passed,
+                TraceInjection::default(),
+            );
+        } else {
+            #[cfg(feature = "win-space-trace")]
+            finish_trace(
+                state,
+                trace_record,
+                None,
+                TraceDisposition::Passed,
+                TraceInjection::default(),
+            );
         }
 
         // --- Alt key ---
@@ -299,27 +393,59 @@ fn keyboard_input(vk: u16, down: bool) -> INPUT {
     }
 }
 
-unsafe fn send_inputs(inputs: &[INPUT]) -> bool {
-    unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) == inputs.len() as u32 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct InputInjectionResult {
+    requested: u8,
+    sent: u8,
+    cleanup_requested: u8,
+    cleanup_sent: u8,
 }
 
-unsafe fn inject_win_combo_release(vk: u16) -> bool {
+impl InputInjectionResult {
+    const fn complete(self) -> bool {
+        self.sent == self.requested
+    }
+}
+
+#[cfg(feature = "win-space-trace")]
+impl From<InputInjectionResult> for TraceInjection {
+    fn from(result: InputInjectionResult) -> Self {
+        Self {
+            requested: result.requested,
+            sent: result.sent,
+            cleanup_requested: result.cleanup_requested,
+            cleanup_sent: result.cleanup_sent,
+        }
+    }
+}
+
+unsafe fn send_inputs(inputs: &[INPUT]) -> u32 {
+    unsafe { SendInput(inputs, std::mem::size_of::<INPUT>() as i32) }
+}
+
+unsafe fn inject_win_combo_release(vk: u16) -> InputInjectionResult {
     let inputs = [
         keyboard_input(VK_CONTROL.0, true),
         keyboard_input(VK_CONTROL.0, false),
         keyboard_input(vk, false),
     ];
-    let complete = unsafe { send_inputs(&inputs) };
-    if !complete {
+    let sent = unsafe { send_inputs(&inputs) };
+    let mut result = InputInjectionResult {
+        requested: inputs.len() as u8,
+        sent: sent as u8,
+        ..Default::default()
+    };
+    if !result.complete() {
         // If SendInput accepted only a prefix, make a best-effort attempt to
         // release both modifiers before passing the real Win-up through.
         let releases = [
             keyboard_input(VK_CONTROL.0, false),
             keyboard_input(vk, false),
         ];
-        let _ = unsafe { send_inputs(&releases) };
+        result.cleanup_requested = releases.len() as u8;
+        result.cleanup_sent = unsafe { send_inputs(&releases) } as u8;
     }
-    complete
+    result
 }
 
 unsafe fn inject_ctrl_tap() -> bool {
@@ -327,7 +453,48 @@ unsafe fn inject_ctrl_tap() -> bool {
         keyboard_input(VK_CONTROL.0, true),
         keyboard_input(VK_CONTROL.0, false),
     ];
-    unsafe { send_inputs(&inputs) }
+    unsafe { send_inputs(&inputs) == inputs.len() as u32 }
+}
+
+#[cfg(feature = "win-space-trace")]
+fn trace_key(vk: u16) -> Option<TraceKey> {
+    match vk {
+        v if v == VK_LWIN.0 => Some(TraceKey::LeftWin),
+        v if v == VK_RWIN.0 => Some(TraceKey::RightWin),
+        v if v == VK_SPACE.0 => Some(TraceKey::Space),
+        v if v == VK_CONTROL.0 || v == VK_LCONTROL.0 || v == VK_RCONTROL.0 => {
+            Some(TraceKey::Control)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(feature = "win-space-trace")]
+fn trace_action(is_down: bool, is_up: bool) -> TraceAction {
+    if is_down {
+        TraceAction::Down
+    } else if is_up {
+        TraceAction::Up
+    } else {
+        TraceAction::Other
+    }
+}
+
+#[cfg(feature = "win-space-trace")]
+fn finish_trace(
+    state: &mut HookState,
+    record: Option<WinSpaceTraceRecord>,
+    decision: Option<win_space::WinSpaceDecision>,
+    disposition: TraceDisposition,
+    injection: TraceInjection,
+) {
+    if let Some(mut record) = record {
+        record.after = state.win_space.snapshot();
+        record.decision = decision;
+        record.disposition = disposition;
+        record.injection = injection;
+        state.record_win_space_trace(record);
+    }
 }
 
 #[cfg(test)]
@@ -340,11 +507,8 @@ mod tests {
         let state = HookState::new(HWND::default(), bindings);
 
         assert_eq!(state.bindings, bindings);
-        assert!(!state.win_held);
-        assert!(!state.win_used_for_combo);
         assert!(!state.alt_held);
         assert!(!state.shift_held);
-        assert!(!state.space_held);
         assert!(!state.caps_held);
         assert!(!state.alt_shift_primed);
         assert!(!state.alt_shift_consumed);
@@ -363,16 +527,5 @@ mod tests {
             state.bindings.get(HookKeyCombo::CapsLock).switch_mode,
             SwitchMode::AllLanguage
         );
-    }
-
-    #[test]
-    fn captured_space_is_released_even_after_win_is_released_first() {
-        let mut state = HookState::new(HWND::default(), KeyBindings::default());
-        state.space_held = true;
-        state.win_held = false;
-
-        assert!(state.release_captured_space(VK_SPACE.0, true));
-        assert!(!state.space_held);
-        assert!(!state.release_captured_space(VK_SPACE.0, true));
     }
 }

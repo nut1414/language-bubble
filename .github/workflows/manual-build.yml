@@ -1,9 +1,15 @@
 name: Build branch binary
 
-run-name: Build ${{ github.ref_name }} for all architectures
+run-name: Build ${{ github.ref_name }} for all architectures (trace=${{ inputs.win_space_trace }})
 
 on:
   workflow_dispatch:
+    inputs:
+      win_space_trace:
+        description: Include the temporary Win+Space diagnostic trace
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -21,6 +27,7 @@ jobs:
             target: aarch64-pc-windows-msvc
     env:
       BUILD_TARGET: ${{ matrix.target }}
+      WIN_SPACE_TRACE: ${{ inputs.win_space_trace }}
 
     steps:
       - name: Check out selected branch
@@ -35,7 +42,13 @@ jobs:
 
       - name: Build release binary
         working-directory: LanguageBubble
-        run: cargo build --release --locked --target ${{ env.BUILD_TARGET }}
+        shell: pwsh
+        run: |
+          $featureArgs = @()
+          if ($env:WIN_SPACE_TRACE -eq 'true') {
+            $featureArgs = @('--features', 'win-space-trace')
+          }
+          cargo build --release --locked --target $env:BUILD_TARGET @featureArgs
 
       - name: Prepare artifact
         id: artifact
@@ -43,7 +56,8 @@ jobs:
         run: |
           $shortSha = $env:GITHUB_SHA.Substring(0, 7)
           $safeBranch = $env:GITHUB_REF_NAME -replace '[^A-Za-z0-9._-]', '-'
-          $artifactName = "LanguageBubble-$safeBranch-$shortSha-${{ matrix.architecture }}"
+          $traceSuffix = if ($env:WIN_SPACE_TRACE -eq 'true') { '-trace' } else { '' }
+          $artifactName = "LanguageBubble-$safeBranch-$shortSha-${{ matrix.architecture }}$traceSuffix"
           New-Item -ItemType Directory -Path dist | Out-Null
           Copy-Item "LanguageBubble/target/$env:BUILD_TARGET/release/language-bubble.exe" "dist/$artifactName.exe"
           "name=$artifactName" >> $env:GITHUB_OUTPUT
@@ -64,4 +78,6 @@ jobs:
           Download the **${{ steps.artifact.outputs.name }}** artifact from this workflow run. GitHub packages the executable as a ZIP file, which can then be attached to an issue or shared elsewhere.
 
           Commit: $env:GITHUB_SHA
+          Win+Space trace enabled: $env:WIN_SPACE_TRACE
+          Trace path when enabled: %TEMP%\LanguageBubble-win-space-trace.log
           "@ >> $env:GITHUB_STEP_SUMMARY
