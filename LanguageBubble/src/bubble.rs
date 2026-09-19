@@ -676,12 +676,16 @@ impl BubbleWindow {
                 ..Default::default()
             };
             let _ = GetMonitorInfoW(monitor, &mut mi);
-            let foreground = GetForegroundWindow();
-            let mut foreground_rect = RECT::default();
-            let foreground_bottom = (!foreground.is_invalid()
-                && GetWindowRect(foreground, &mut foreground_rect).is_ok()
-                && foreground_rect.bottom > foreground_rect.top)
-                .then_some(foreground_rect.bottom);
+            let foreground_bottom = if phys_pt.quality.is_field_fallback() {
+                let foreground = GetForegroundWindow();
+                let mut rect = RECT::default();
+                (!foreground.is_invalid()
+                    && GetWindowRect(foreground, &mut rect).is_ok()
+                    && rect.bottom > rect.top)
+                    .then_some(rect.bottom)
+            } else {
+                None
+            };
             PlacementContext {
                 caret: phys_pt,
                 work_area: work_area_from_rect(mi.rcWork),

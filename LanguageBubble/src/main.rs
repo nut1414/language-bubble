@@ -17,7 +17,6 @@ use std::cell::{Cell, RefCell};
 use std::mem;
 
 use windows::Win32::Foundation::*;
-use windows::Win32::Graphics::Gdi::*;
 use windows::Win32::System::Com::*;
 use windows::Win32::System::Threading::{CreateEventW, CreateMutexW, INFINITE, SetEvent};
 use windows::Win32::UI::WindowsAndMessaging::*;
@@ -47,14 +46,6 @@ struct AppState {
     is_switching: bool,
     pending_combo: Option<HookKeyCombo>,
     pending_update: Option<String>,
-    last_good_caret: Option<LastGoodCaret>,
-}
-
-#[derive(Clone, Copy)]
-struct LastGoodCaret {
-    foreground: HWND,
-    monitor: HMONITOR,
-    point: caret::ScreenPoint,
 }
 
 struct ComApartment;
@@ -278,7 +269,6 @@ fn run() -> Result<()> {
             is_switching: false,
             pending_combo: None,
             pending_update,
-            last_good_caret: None,
         });
     });
 
@@ -538,7 +528,7 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
     state.language_service.record_layout_usage(new_layout.hkl);
 
     // Get caret position
-    let caret_pos = resolve_caret_position(state, caret::get_caret_screen_position());
+    let caret_pos = caret::get_caret_screen_position();
 
     // Pick which layouts to show
     let display_layouts: Vec<language::LayoutInfo> = if mode == SwitchMode::AllLanguage {
@@ -568,62 +558,6 @@ fn process_switch(state: &mut AppState, combo: HookKeyCombo) {
     } else {
         state.is_switching = false;
     }
-}
-
-fn resolve_caret_position(
-    state: &mut AppState,
-    candidate: Option<caret::ScreenPoint>,
-) -> Option<caret::ScreenPoint> {
-    let foreground = unsafe { GetForegroundWindow() };
-    if foreground.is_invalid() {
-        return candidate;
-    }
-
-    let monitor = unsafe {
-        if let Some(point) = candidate {
-            MonitorFromPoint(
-                POINT {
-                    x: point.x,
-                    y: point.y,
-                },
-                MONITOR_DEFAULTTONEAREST,
-            )
-        } else {
-            MonitorFromWindow(foreground, MONITOR_DEFAULTTONEAREST)
-        }
-    };
-
-    apply_cached_caret(candidate, foreground, monitor, &mut state.last_good_caret)
-}
-
-fn apply_cached_caret(
-    candidate: Option<caret::ScreenPoint>,
-    foreground: HWND,
-    monitor: HMONITOR,
-    cache: &mut Option<LastGoodCaret>,
-) -> Option<caret::ScreenPoint> {
-    if cache
-        .as_ref()
-        .is_some_and(|last| last.monitor != monitor || last.foreground != foreground)
-    {
-        *cache = None;
-    }
-
-    if let Some(point) = candidate {
-        if point.quality == caret::CaretQuality::Reliable {
-            *cache = Some(LastGoodCaret {
-                foreground,
-                monitor,
-                point,
-            });
-        }
-        return Some(point);
-    }
-
-    cache
-        .as_ref()
-        .filter(|last| last.foreground == foreground && last.monitor == monitor)
-        .map(|last| last.point)
 }
 
 fn on_tray_right_click(hwnd: HWND) {
@@ -822,14 +756,6 @@ fn pick_color(hwnd: HWND, initial: u32) -> Option<u32> {
 mod tests {
     use super::*;
 
-    fn test_hwnd(value: usize) -> HWND {
-        HWND(value as *mut std::ffi::c_void)
-    }
-
-    fn test_monitor(value: usize) -> HMONITOR {
-        HMONITOR(value as *mut std::ffi::c_void)
-    }
-
     #[test]
     fn system_theme_change_compares_setting_contents() {
         let immersive: Vec<u16> = "ImmersiveColorSet"
@@ -843,27 +769,5 @@ mod tests {
             assert!(!is_system_theme_change(LPARAM(unrelated.as_ptr() as isize)));
             assert!(!is_system_theme_change(LPARAM(0)));
         }
-    }
-
-    #[test]
-    fn caret_cache_reuses_only_the_same_window_and_monitor() {
-        let foreground = test_hwnd(1);
-        let monitor = test_monitor(2);
-        let point = caret::ScreenPoint::default();
-        let mut cache = None;
-
-        assert_eq!(
-            apply_cached_caret(Some(point), foreground, monitor, &mut cache).map(|p| p.x),
-            Some(0)
-        );
-        assert!(apply_cached_caret(None, foreground, monitor, &mut cache).is_some());
-        assert!(apply_cached_caret(None, test_hwnd(3), monitor, &mut cache).is_none());
-
-        let mut cache = Some(LastGoodCaret {
-            foreground,
-            monitor,
-            point,
-        });
-        assert!(apply_cached_caret(None, foreground, test_monitor(4), &mut cache).is_none());
     }
 }

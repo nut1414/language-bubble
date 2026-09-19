@@ -13,6 +13,10 @@ use windows::core::*;
 const DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2: isize = -4;
 const OBJID_CARET: i32 = -8;
 const MAX_BOUNDING_RECT_VALUES: usize = 4096;
+const MIN_RELIABLE_CARET_HEIGHT_DIP: f32 = 8.0;
+const MIN_MULTILINE_EDIT_HEIGHT_DIP: f32 = 80.0;
+const MAX_COMPACT_EDIT_HEIGHT_DIP: f32 = 240.0;
+const MAX_EDIT_CONTAINER_PADDING_DIP: f32 = 64.0;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenRect {
@@ -22,13 +26,26 @@ pub struct ScreenRect {
     pub bottom: i32,
 }
 
+impl ScreenRect {
+    fn height(self) -> i32 {
+        self.bottom - self.top
+    }
+
+    fn contains(self, other: Self) -> bool {
+        self.left <= other.left
+            && other.right <= self.right
+            && self.top <= other.top
+            && other.bottom <= self.bottom
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CaretQuality {
     /// A text API returned a usable caret/range rectangle, or Win32 returned
     /// a caret with a normal text height.
     Reliable,
     /// A collapsed UIA range exposed a neighboring character, not the caret
-    /// itself. Use its edge as a typing-position estimate, but do not cache it.
+    /// itself. Use its edge as a typing-position estimate.
     TextNeighbor,
     /// No caret was exposed, so the focused element bounds are the best
     /// available anchor. Keep the existing below-the-element placement.
@@ -39,6 +56,12 @@ pub enum CaretQuality {
     Unreliable,
 }
 
+impl CaretQuality {
+    pub(crate) fn is_field_fallback(self) -> bool {
+        matches!(self, Self::EditFallback | Self::Unreliable)
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct ScreenPoint {
     pub x: i32,
@@ -46,18 +69,6 @@ pub struct ScreenPoint {
     pub caret_top: i32, // caret top (for placing bubble above)
     pub quality: CaretQuality,
     pub element_rect: Option<ScreenRect>,
-}
-
-impl Default for ScreenPoint {
-    fn default() -> Self {
-        Self {
-            x: 0,
-            y: 0,
-            caret_top: 0,
-            quality: CaretQuality::Reliable,
-            element_rect: None,
-        }
-    }
 }
 
 impl ScreenPoint {
@@ -83,23 +94,13 @@ impl ScreenPoint {
 }
 
 pub fn get_caret_screen_position() -> Option<ScreenPoint> {
-    let gui = try_gui_thread_info();
-    if gui.is_some_and(ScreenPoint::is_reliable) {
-        return gui;
-    }
-
-    let msaa = try_msaa_caret();
-    if msaa.is_some_and(ScreenPoint::is_reliable) {
-        return msaa;
-    }
-
-    select_caret_candidate(gui, msaa, try_uia_caret())
+    select_caret_candidate(try_gui_thread_info(), try_msaa_caret, try_uia_caret)
 }
 
 fn select_caret_candidate(
     gui: Option<ScreenPoint>,
-    msaa: Option<ScreenPoint>,
-    uia: UiaCaretProbe,
+    msaa: impl FnOnce() -> Option<ScreenPoint>,
+    uia: impl FnOnce() -> UiaCaretProbe,
 ) -> Option<ScreenPoint> {
     // Strategy 1: Win32 GetGUIThreadInfo (Notepad, classic Win32 apps)
     if gui.is_some_and(ScreenPoint::is_reliable) {
@@ -107,11 +108,13 @@ fn select_caret_candidate(
     }
 
     // Strategy 2: MSAA IAccessible OBJID_CARET (Chrome, many apps)
+    let msaa = msaa();
     if msaa.is_some_and(ScreenPoint::is_reliable) {
         return msaa;
     }
 
     // Strategy 3+4: COM UI Automation (Explorer, modern controls, Office, Edge)
+    let uia = uia();
     if let Some(pt) = uia.point
         && (pt.is_reliable()
             || pt.quality == CaretQuality::TextNeighbor
@@ -148,7 +151,7 @@ struct UiaElementCaret {
 }
 
 fn is_tall_caret(height: i32, dpi_scale: f32) -> bool {
-    height as f32 >= 8.0_f32.max(8.0 * dpi_scale)
+    height as f32 >= MIN_RELIABLE_CARET_HEIGHT_DIP.max(MIN_RELIABLE_CARET_HEIGHT_DIP * dpi_scale)
 }
 
 fn window_dpi_scale(hwnd: HWND) -> f32 {
@@ -172,11 +175,12 @@ fn is_compact_edit_rect(
     rect: ScreenRect,
     dpi_scale: f32,
 ) -> bool {
-    control_type == UIA_EditControlTypeId && rect.bottom - rect.top <= (240.0 * dpi_scale) as i32
+    control_type == UIA_EditControlTypeId
+        && rect.height() <= (MAX_COMPACT_EDIT_HEIGHT_DIP * dpi_scale) as i32
 }
 
 fn is_multiline_edit_candidate(rect: ScreenRect, dpi_scale: f32) -> bool {
-    rect.bottom - rect.top >= (80.0 * dpi_scale) as i32
+    rect.height() >= (MIN_MULTILINE_EDIT_HEIGHT_DIP * dpi_scale) as i32
 }
 
 fn nearby_edit_container(
@@ -184,16 +188,13 @@ fn nearby_edit_container(
     parent: ScreenRect,
     dpi_scale: f32,
 ) -> Option<ScreenRect> {
-    let padding = (64.0 * dpi_scale) as i32;
-    (parent.left <= edit.left
-        && edit.right <= parent.right
-        && parent.top <= edit.top
-        && edit.bottom <= parent.bottom
+    let padding = (MAX_EDIT_CONTAINER_PADDING_DIP * dpi_scale) as i32;
+    (parent.contains(edit)
         && edit.left - parent.left <= padding
         && parent.right - edit.right <= padding
         && edit.top - parent.top <= padding
         && parent.bottom - edit.bottom <= padding
-        && parent.bottom - parent.top <= (240.0 * dpi_scale) as i32)
+        && parent.height() <= (MAX_COMPACT_EDIT_HEIGHT_DIP * dpi_scale) as i32)
         .then_some(parent)
 }
 
@@ -380,100 +381,108 @@ fn try_uia_caret_inner() -> UiaCaretProbe {
         let Ok(focused) = uia.GetFocusedElement() else {
             return UiaCaretProbe::default();
         };
-        let raw_focused_rect = current_element_rect(&focused);
+        let focused_bounds = current_element_rect(&focused);
         let control_type = focused.CurrentControlType().ok();
         let dpi_scale = window_dpi_scale(GetForegroundWindow());
-        let mut focused_rect = raw_focused_rect.filter(|rect| {
+        let focused_edit_bounds = focused_bounds.filter(|rect| {
             control_type.is_some_and(|kind| is_compact_edit_rect(kind, *rect, dpi_scale))
         });
-        let edit_rect = focused_rect;
-        let mut has_text_pattern = false;
-
+        let mut placement_bounds = focused_edit_bounds;
         // Qt may expose only the text area as the focused Edit. Include a
         // nearby composer container before deciding whether this is a
         // multiline editor; a phone-number field must not use text-neighbor
         // geometry, which can overlap the digits.
-        if let Some(edit_rect) = edit_rect
-            && let Ok(walker) = uia.ControlViewWalker()
-            && let Ok(parent) = walker.GetParentElement(&focused)
-            && let Some(parent_rect) = current_element_rect(&parent)
-        {
-            focused_rect =
-                nearby_edit_container(edit_rect, parent_rect, dpi_scale).or(focused_rect);
+        let walker = focused_edit_bounds.and_then(|_| uia.ControlViewWalker().ok());
+        let first_parent = walker
+            .as_ref()
+            .and_then(|walker| walker.GetParentElement(&focused).ok());
+        let first_parent_rect = first_parent.as_ref().and_then(current_element_rect);
+        if let Some(edit_bounds) = focused_edit_bounds {
+            placement_bounds = first_parent_rect
+                .and_then(|parent| nearby_edit_container(edit_bounds, parent, dpi_scale))
+                .or(placement_bounds);
         }
 
         // Try focused element directly
         let allow_neighbor =
-            focused_rect.is_some_and(|rect| is_multiline_edit_candidate(rect, dpi_scale));
-        let focused_caret = try_uia_element_caret(&focused, allow_neighbor);
-        has_text_pattern |= focused_caret.has_text_pattern;
-        if let Some(mut pt) = focused_caret.point {
-            if let Some(rect) = focused_rect {
-                pt = anchor_uia_point_in_edit(pt, rect, dpi_scale);
-            }
+            placement_bounds.is_some_and(|rect| is_multiline_edit_candidate(rect, dpi_scale));
+        let focused_caret =
+            probe_uia_element(&focused, placement_bounds, dpi_scale, allow_neighbor);
+        if let Some(pt) = focused_caret.point {
             return UiaCaretProbe {
                 point: Some(pt),
-                element_rect: focused_rect,
+                element_rect: placement_bounds,
             };
         }
 
         // Walk up the tree (max 4 levels)
-        if let Ok(walker) = uia.ControlViewWalker() {
-            let mut current = focused.clone();
-            for _ in 0..4 {
-                match walker.GetParentElement(&current) {
-                    Ok(parent) => {
-                        if let Some(edit_rect) = edit_rect
-                            && let Some(parent_rect) = current_element_rect(&parent)
-                        {
-                            focused_rect = nearby_edit_container(edit_rect, parent_rect, dpi_scale)
-                                .or(focused_rect);
-                        }
-                        let parent_caret = try_uia_element_caret(&parent, false);
-                        has_text_pattern |= parent_caret.has_text_pattern;
-                        if let Some(mut pt) = parent_caret.point {
-                            if let Some(rect) = focused_rect {
-                                pt = anchor_uia_point_in_edit(pt, rect, dpi_scale);
-                            }
-                            return UiaCaretProbe {
-                                point: Some(pt),
-                                element_rect: focused_rect,
-                            };
-                        }
-                        current = parent;
-                    }
-                    Err(_) => break,
+        if let Some(walker) = walker.or_else(|| uia.ControlViewWalker().ok()) {
+            let mut parent = first_parent.or_else(|| walker.GetParentElement(&focused).ok());
+            for depth in 0..4 {
+                let Some(current) = parent else { break };
+                if depth > 0
+                    && let Some(edit_bounds) = focused_edit_bounds
+                {
+                    placement_bounds = current_element_rect(&current)
+                        .and_then(|parent| nearby_edit_container(edit_bounds, parent, dpi_scale))
+                        .or(placement_bounds);
                 }
+                if let Some(pt) =
+                    probe_uia_element(&current, placement_bounds, dpi_scale, false).point
+                {
+                    return UiaCaretProbe {
+                        point: Some(pt),
+                        element_rect: placement_bounds,
+                    };
+                }
+                parent = walker.GetParentElement(&current).ok();
             }
         }
 
-        // A compact edit control is a useful anchor even when its text
-        // pattern exposes no caret. Large text/document surfaces are not.
-        if !has_text_pattern {
-            return UiaCaretProbe {
-                point: try_bounding_rect_fallback(&focused),
-                element_rect: raw_focused_rect,
-            };
-        }
-        if focused_rect.is_some() {
-            return UiaCaretProbe {
-                point: focused_rect.map(point_from_edit_rect),
-                element_rect: focused_rect,
-            };
-        }
-
-        // A text pattern exists but did not expose a rectangle. Do not turn
-        // the entire text control into a fake caret; retain its bounds only
-        // so a low-level tiny caret can use the element bottom for Y.
-        UiaCaretProbe {
-            point: None,
-            element_rect: focused_rect,
-        }
+        finish_uia_probe(
+            focused_bounds,
+            placement_bounds,
+            focused_caret.has_text_pattern,
+        )
     }
 }
 
 fn current_element_rect(element: &IUIAutomationElement) -> Option<ScreenRect> {
     unsafe { screen_rect_from_rect(element.CurrentBoundingRectangle().ok()?) }
+}
+
+fn probe_uia_element(
+    element: &IUIAutomationElement,
+    edit_rect: Option<ScreenRect>,
+    dpi_scale: f32,
+    allow_neighbor: bool,
+) -> UiaElementCaret {
+    let mut probe = try_uia_element_caret(element, allow_neighbor);
+    probe.point = probe.point.map(|point| {
+        edit_rect.map_or(point, |rect| {
+            anchor_uia_point_in_edit(point, rect, dpi_scale)
+        })
+    });
+    probe
+}
+
+fn finish_uia_probe(
+    focused_bounds: Option<ScreenRect>,
+    placement_bounds: Option<ScreenRect>,
+    focused_has_text_pattern: bool,
+) -> UiaCaretProbe {
+    if !focused_has_text_pattern {
+        return UiaCaretProbe {
+            point: focused_bounds.map(point_from_element_rect),
+            element_rect: focused_bounds,
+        };
+    }
+
+    // An empty text pattern must not turn a large document into a fake caret.
+    UiaCaretProbe {
+        point: placement_bounds.map(point_from_edit_rect),
+        element_rect: placement_bounds,
+    }
 }
 
 fn try_uia_element_caret(element: &IUIAutomationElement, allow_neighbor: bool) -> UiaElementCaret {
@@ -528,37 +537,15 @@ fn try_uia_element_caret(element: &IUIAutomationElement, allow_neighbor: bool) -
     }
 }
 
-/// Fallback: use the focused element's bounding rectangle.
-/// Works for Explorer rename boxes and other simple input controls.
-fn try_bounding_rect_fallback(element: &IUIAutomationElement) -> Option<ScreenPoint> {
-    unsafe {
-        let rect = element.CurrentBoundingRectangle().ok()?;
-
-        let x = rect.left as f64;
-        let y = rect.top as f64;
-        let w = (rect.right - rect.left) as f64;
-        let h = (rect.bottom - rect.top) as f64;
-
-        if w <= 0.0 || h <= 0.0 {
-            return None;
-        }
-
-        // Return center-x, bottom-y of the element
-        let rect = ScreenRect {
-            left: x as i32,
-            top: y as i32,
-            right: (x + w) as i32,
-            bottom: (y + h) as i32,
-        };
-
-        Some(ScreenPoint::from_top_bottom(
-            (x + w / 2.0) as i32,
-            rect.top,
-            rect.bottom,
-            CaretQuality::ElementFallback,
-            Some(rect),
-        ))
-    }
+/// Fallback for focused controls without a text pattern (e.g. Explorer rename).
+fn point_from_element_rect(rect: ScreenRect) -> ScreenPoint {
+    ScreenPoint::from_top_bottom(
+        ((rect.left as f64 + rect.right as f64) / 2.0) as i32,
+        rect.top,
+        rect.bottom,
+        CaretQuality::ElementFallback,
+        Some(rect),
+    )
 }
 
 fn range_rectangles(range: &IUIAutomationTextRange) -> Option<Vec<f64>> {
@@ -568,9 +555,15 @@ fn range_rectangles(range: &IUIAutomationTextRange) -> Option<Vec<f64>> {
     }
 }
 
+#[derive(Clone, Copy)]
+enum RectangleEdge {
+    Left,
+    Right,
+}
+
 fn point_from_rectangles(
     rects: &[f64],
-    right_edge: bool,
+    edge: RectangleEdge,
     quality: CaretQuality,
 ) -> Option<ScreenPoint> {
     let [left, top, width, height, ..] = rects else {
@@ -582,12 +575,16 @@ fn point_from_rectangles(
         || !height.is_finite()
         || *width < 0.0
         || *height <= 0.0
-        || (right_edge && *width == 0.0)
     {
         return None;
     }
+    let x = match edge {
+        RectangleEdge::Left => *left,
+        RectangleEdge::Right if *width > 0.0 => left + width,
+        RectangleEdge::Right => return None,
+    };
     Some(ScreenPoint::from_top_bottom(
-        (left + if right_edge { *width } else { 0.0 }) as i32,
+        x as i32,
         *top as i32,
         (top + height) as i32,
         quality,
@@ -597,9 +594,9 @@ fn point_from_rectangles(
 
 fn point_from_range(range: &IUIAutomationTextRange, allow_neighbor: bool) -> Option<ScreenPoint> {
     unsafe {
-        if let Some(pt) = range_rectangles(range)
-            .and_then(|rects| point_from_rectangles(&rects, false, CaretQuality::Reliable))
-        {
+        if let Some(pt) = range_rectangles(range).and_then(|rects| {
+            point_from_rectangles(&rects, RectangleEdge::Left, CaretQuality::Reliable)
+        }) {
             return Some(pt);
         }
 
@@ -621,7 +618,7 @@ fn point_from_range(range: &IUIAutomationTextRange, allow_neighbor: bool) -> Opt
             if let Some(pt) = range_rectangles(&expanded).and_then(|rects| {
                 point_from_rectangles(
                     &rects,
-                    false,
+                    RectangleEdge::Left,
                     if collapsed {
                         CaretQuality::TextNeighbor
                     } else {
@@ -644,8 +641,9 @@ fn point_from_range(range: &IUIAutomationTextRange, allow_neighbor: bool) -> Opt
         {
             return None;
         }
-        range_rectangles(&neighbor)
-            .and_then(|rects| point_from_rectangles(&rects, true, CaretQuality::TextNeighbor))
+        range_rectangles(&neighbor).and_then(|rects| {
+            point_from_rectangles(&rects, RectangleEdge::Right, CaretQuality::TextNeighbor)
+        })
     }
 }
 
@@ -702,6 +700,7 @@ unsafe fn owned_safearray_to_f64s(raw: *mut SAFEARRAY) -> Option<Vec<f64>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::cell::Cell;
 
     fn point(x: i32, height: i32, quality: CaretQuality) -> ScreenPoint {
         ScreenPoint::from_top_bottom(x, 100, 100 + height, quality, None)
@@ -721,18 +720,28 @@ mod tests {
     #[test]
     fn collapsed_range_neighbor_uses_character_edge_without_changing_direct_range() {
         let rect = [100.0, 200.0, 12.0, 20.0];
-        let direct = point_from_rectangles(&rect, false, CaretQuality::Reliable).unwrap();
-        let neighbor = point_from_rectangles(&rect, true, CaretQuality::TextNeighbor).unwrap();
+        let direct =
+            point_from_rectangles(&rect, RectangleEdge::Left, CaretQuality::Reliable).unwrap();
+        let neighbor =
+            point_from_rectangles(&rect, RectangleEdge::Right, CaretQuality::TextNeighbor).unwrap();
         assert_eq!((direct.x, direct.y), (100, 220));
         assert_eq!((neighbor.x, neighbor.y), (112, 220));
         assert!(!neighbor.is_reliable());
         assert!(
-            point_from_rectangles(&[100.0, 200.0, 0.0, 20.0], false, CaretQuality::Reliable)
-                .is_some()
+            point_from_rectangles(
+                &[100.0, 200.0, 0.0, 20.0],
+                RectangleEdge::Left,
+                CaretQuality::Reliable
+            )
+            .is_some()
         );
         assert!(
-            point_from_rectangles(&[100.0, 200.0, 0.0, 20.0], true, CaretQuality::TextNeighbor)
-                .is_none()
+            point_from_rectangles(
+                &[100.0, 200.0, 0.0, 20.0],
+                RectangleEdge::Right,
+                CaretQuality::TextNeighbor
+            )
+            .is_none()
         );
     }
 
@@ -744,15 +753,23 @@ mod tests {
             element_rect: None,
         };
         assert_eq!(
-            select_caret_candidate(Some(point(100, 2, CaretQuality::Unreliable)), None, uia)
-                .unwrap()
-                .x,
+            select_caret_candidate(
+                Some(point(100, 2, CaretQuality::Unreliable)),
+                || None,
+                || uia
+            )
+            .unwrap()
+            .x,
             400
         );
         assert_eq!(
-            select_caret_candidate(Some(point(100, 20, CaretQuality::Reliable)), None, uia)
-                .unwrap()
-                .x,
+            select_caret_candidate(
+                Some(point(100, 20, CaretQuality::Reliable)),
+                || None,
+                || uia
+            )
+            .unwrap()
+            .x,
             100
         );
     }
@@ -784,6 +801,38 @@ mod tests {
             },
             1.0,
         ));
+    }
+
+    #[test]
+    fn parent_text_pattern_does_not_suppress_focused_element_fallback() {
+        let focused = ScreenRect {
+            left: 100,
+            top: 200,
+            right: 300,
+            bottom: 240,
+        };
+        // Ancestors may expose empty text patterns; only the focused element's
+        // pattern status decides whether its bounds are a valid fallback.
+        let probe = finish_uia_probe(Some(focused), None, false);
+        let point = probe.point.expect("focused element bounds fallback");
+        assert_eq!(point.quality, CaretQuality::ElementFallback);
+        assert_eq!((point.x, point.y), (200, 240));
+        assert_eq!(probe.element_rect, Some(focused));
+    }
+
+    #[test]
+    fn empty_focused_text_pattern_uses_only_compact_edit_bounds() {
+        let edit = ScreenRect {
+            left: 100,
+            top: 200,
+            right: 300,
+            bottom: 240,
+        };
+        let compact = finish_uia_probe(Some(edit), Some(edit), true);
+        assert_eq!(compact.point.unwrap().quality, CaretQuality::EditFallback);
+        let document = finish_uia_probe(Some(edit), None, true);
+        assert!(document.point.is_none());
+        assert!(document.element_rect.is_none());
     }
 
     #[test]
@@ -864,8 +913,8 @@ mod tests {
     fn reliable_gui_result_keeps_existing_strategy_priority() {
         let selected = select_caret_candidate(
             Some(point(10, 24, CaretQuality::Reliable)),
-            Some(point(20, 30, CaretQuality::Reliable)),
-            UiaCaretProbe {
+            || Some(point(20, 30, CaretQuality::Reliable)),
+            || UiaCaretProbe {
                 point: Some(point(30, 28, CaretQuality::Reliable)),
                 element_rect: None,
             },
@@ -877,11 +926,51 @@ mod tests {
     }
 
     #[test]
+    fn reliable_provider_skips_slower_probes() {
+        let msaa_called = Cell::new(false);
+        let uia_called = Cell::new(false);
+        let selected = select_caret_candidate(
+            Some(point(10, 24, CaretQuality::Reliable)),
+            || {
+                msaa_called.set(true);
+                None
+            },
+            || {
+                uia_called.set(true);
+                UiaCaretProbe::default()
+            },
+        );
+        assert_eq!(selected.unwrap().x, 10);
+        assert!(!msaa_called.get());
+        assert!(!uia_called.get());
+    }
+
+    #[test]
+    fn reliable_msaa_skips_uia() {
+        let uia_called = Cell::new(false);
+        let selected = select_caret_candidate(
+            Some(point(10, 2, CaretQuality::Unreliable)),
+            || Some(point(20, 24, CaretQuality::Reliable)),
+            || {
+                uia_called.set(true);
+                UiaCaretProbe::default()
+            },
+        );
+        assert_eq!(selected.unwrap().x, 20);
+        assert!(!uia_called.get());
+    }
+
+    #[test]
+    fn missing_current_providers_do_not_reuse_an_old_point() {
+        assert!(select_caret_candidate(None, || None, UiaCaretProbe::default).is_none());
+    }
+
+    #[test]
     fn tall_msaa_result_replaces_only_a_tiny_gui_result() {
         let selected = select_caret_candidate(
             Some(point(10, 2, CaretQuality::Unreliable)),
-            Some(point(20, 30, CaretQuality::Reliable)),
-            UiaCaretProbe::default(),
+            || Some(point(20, 30, CaretQuality::Reliable)),
+            UiaCaretProbe::default,
         )
         .expect("a caret candidate");
 
@@ -899,8 +988,8 @@ mod tests {
         };
         let selected = select_caret_candidate(
             Some(point(350, 2, CaretQuality::Unreliable)),
-            None,
-            UiaCaretProbe {
+            || None,
+            || UiaCaretProbe {
                 point: None,
                 element_rect: Some(element_rect),
             },
@@ -917,8 +1006,8 @@ mod tests {
         let fallback = point(300, 60, CaretQuality::ElementFallback);
         let selected = select_caret_candidate(
             None,
-            None,
-            UiaCaretProbe {
+            || None,
+            || UiaCaretProbe {
                 point: Some(fallback),
                 element_rect: None,
             },
