@@ -676,9 +676,16 @@ impl BubbleWindow {
                 ..Default::default()
             };
             let _ = GetMonitorInfoW(monitor, &mut mi);
+            let foreground = GetForegroundWindow();
+            let mut foreground_rect = RECT::default();
+            let foreground_bottom = (!foreground.is_invalid()
+                && GetWindowRect(foreground, &mut foreground_rect).is_ok()
+                && foreground_rect.bottom > foreground_rect.top)
+                .then_some(foreground_rect.bottom);
             PlacementContext {
                 caret: phys_pt,
                 work_area: work_area_from_rect(mi.rcWork),
+                foreground_bottom,
                 window_size,
                 dpi_scale,
                 metrics: self.size.metrics(),
