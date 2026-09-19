@@ -117,9 +117,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: LanguageBubble-msix
-          path: |
-            release/*.msix
-            release/*.msixbundle
+          path: release/*.msix
 
   release:
     needs: msix
