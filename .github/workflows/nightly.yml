@@ -19,6 +19,8 @@ concurrency:
 
 jobs:
   check:
+    # Nightly always tracks main; ignore manual runs started from other refs.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
@@ -127,10 +129,14 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           TITLE: Nightly ${{ needs.check.outputs.date }} (${{ needs.check.outputs.short_sha }})
+          NOTES: Automated build of ${{ github.sha }} from `main`. This is not a stable release and may contain bugs.
         run: |
-          gh release delete nightly --cleanup-tag --yes || true
-          gh release create nightly artifacts/* \
-            --prerelease \
-            --target "$GITHUB_SHA" \
-            --title "$TITLE" \
-            --notes "Automated build of $GITHUB_SHA from \`$GITHUB_REF_NAME\`. This is not a stable release and may contain bugs."
+          if gh release view nightly > /dev/null 2>&1; then
+            # Replace assets first so the existing release stays usable if anything fails.
+            gh release upload nightly artifacts/* --clobber
+            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true
+            gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
+          else
+            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly" > /dev/null 2>&1 || true
+            gh release create nightly artifacts/* --prerelease --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+          fi
