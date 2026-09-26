@@ -78,15 +78,17 @@ jobs:
         run: cargo test --locked --all-targets
 
   build:
-    needs: quality
+    needs: [check, quality]
     runs-on: windows-latest
     strategy:
       matrix:
         include:
           - target: x86_64-pc-windows-msvc
-            artifact: LanguageBubble-nightly-win-x64
+            arch: x64
           - target: aarch64-pc-windows-msvc
-            artifact: LanguageBubble-nightly-win-arm64
+            arch: arm64
+    env:
+      ARTIFACT: LanguageBubble-nightly-${{ needs.check.outputs.short_sha }}-win-${{ matrix.arch }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -100,6 +102,7 @@ jobs:
         working-directory: LanguageBubble
         run: cargo build --release --locked --target ${{ matrix.target }}
         env:
+          LANGUAGE_BUBBLE_BUILD_COMMIT: ${{ github.sha }}
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
           CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
           CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: link.exe
@@ -107,13 +110,13 @@ jobs:
 
       - name: Rename artifact
         run: |
-          Copy-Item "LanguageBubble/target/${{ matrix.target }}/release/language-bubble.exe" "${{ matrix.artifact }}.exe"
+          Copy-Item "LanguageBubble/target/${{ matrix.target }}/release/language-bubble.exe" "$($env:ARTIFACT).exe"
         shell: pwsh
 
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
-          path: ${{ matrix.artifact }}.exe
+          name: ${{ env.ARTIFACT }}
+          path: ${{ env.ARTIFACT }}.exe
           if-no-files-found: error
 
   publish:
@@ -158,22 +161,28 @@ jobs:
             exit 0
           fi
 
+          # Drop staged leftovers from an earlier failed run so they can't be swapped in.
+          gh api "$api/releases/tags/$RELEASE_TAG" --jq '.assets[] | select(.name | endswith(".new")) | .id' |
+            while read -r id; do gh api -X DELETE "$api/releases/assets/$id"; done
+
           # Upload replacements under temporary names so the current assets stay downloadable.
           mkdir staged
           for f in artifacts/*; do cp "$f" "staged/$(basename "$f").new"; done
-          gh release upload "$RELEASE_TAG" staged/* --clobber
+          gh release upload "$RELEASE_TAG" staged/*
 
-          # Swap each staged asset in for the old one.
+          # Swap: file names carry the commit, so remove every previous asset, then
+          # drop the .new suffix from the staged ones.
           assets=$(gh api "$api/releases/tags/$RELEASE_TAG" --jq '.assets[] | "\(.id) \(.name)"')
-          for f in artifacts/*; do
-            name=$(basename "$f")
-            old_id=$(awk -v n="$name" '$2 == n { print $1 }' <<< "$assets")
-            new_id=$(awk -v n="$name.new" '$2 == n { print $1 }' <<< "$assets")
-            if [ -n "$old_id" ]; then
-              gh api -X DELETE "$api/releases/assets/$old_id"
+          while read -r id name; do
+            if [[ "$name" != *.new ]]; then
+              gh api -X DELETE "$api/releases/assets/$id"
             fi
-            gh api -X PATCH "$api/releases/assets/$new_id" -f name="$name" > /dev/null
-          done
+          done <<< "$assets"
+          while read -r id name; do
+            if [[ "$name" == *.new ]]; then
+              gh api -X PATCH "$api/releases/assets/$id" -f name="${name%.new}" > /dev/null
+            fi
+          done <<< "$assets"
 
           gh release edit "$RELEASE_TAG" --prerelease --title "$TITLE" --notes "$NOTES"
 
