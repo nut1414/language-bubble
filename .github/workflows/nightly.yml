@@ -1,9 +1,6 @@
 name: Nightly
 
 on:
-  push:  # TEMP: test run, revert before merge
-    branches:
-      - claude/zen-hypatia-bgelo4
   schedule:
     - cron: '0 0 * * *'
   workflow_dispatch:
@@ -17,7 +14,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_TAG: nightly-test  # TEMP: test run, revert before merge
+  RELEASE_TAG: nightly
 
 concurrency:
   group: nightly
@@ -26,7 +23,7 @@ concurrency:
 jobs:
   check:
     # Nightly always tracks main; ignore manual runs started from other refs.
-    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/claude/zen-hypatia-bgelo4'  # TEMP
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
