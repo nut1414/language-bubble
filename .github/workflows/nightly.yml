@@ -1,0 +1,136 @@
+name: Nightly
+
+on:
+  schedule:
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: Build even if the commit has not changed since the last nightly
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: nightly
+  cancel-in-progress: false
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      short_sha: ${{ steps.check.outputs.short_sha }}
+      date: ${{ steps.check.outputs.date }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare with previous nightly
+        id: check
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          previous=$(git ls-remote origin 'refs/tags/nightly' 'refs/tags/nightly^{}' | sort -k2 | tail -n1 | cut -f1)
+          echo "Previous nightly: ${previous:-<none>}"
+          echo "Current commit:   $GITHUB_SHA"
+          if [ "$FORCE" = "true" ] || [ "$previous" != "$GITHUB_SHA" ]; then
+            echo "should_build=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "No new commits since the last nightly; skipping." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "short_sha=${GITHUB_SHA::7}" >> "$GITHUB_OUTPUT"
+          echo "date=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+
+  quality:
+    needs: check
+    if: needs.check.outputs.should_build == 'true'
+    runs-on: windows-latest
+    defaults:
+      run:
+        working-directory: LanguageBubble
+    env:
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
+      CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Run tests
+        run: cargo test --locked --all-targets
+
+  build:
+    needs: quality
+    runs-on: windows-latest
+    strategy:
+      matrix:
+        include:
+          - target: x86_64-pc-windows-msvc
+            artifact: LanguageBubble-nightly-win-x64
+          - target: aarch64-pc-windows-msvc
+            artifact: LanguageBubble-nightly-win-arm64
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Build
+        working-directory: LanguageBubble
+        run: cargo build --release --locked --target ${{ matrix.target }}
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER: link.exe
+          CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_LINKER: link.exe
+          CARGO_TARGET_AARCH64_PC_WINDOWS_MSVC_RUSTFLAGS: "-Ctarget-feature=+crt-static"
+
+      - name: Rename artifact
+        run: |
+          Copy-Item "LanguageBubble/target/${{ matrix.target }}/release/language-bubble.exe" "${{ matrix.artifact }}.exe"
+        shell: pwsh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: ${{ matrix.artifact }}.exe
+          if-no-files-found: error
+
+  publish:
+    needs: [check, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Publish nightly prerelease
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TITLE: Nightly ${{ needs.check.outputs.date }} (${{ needs.check.outputs.short_sha }})
+        run: |
+          gh release delete nightly --cleanup-tag --yes || true
+          gh release create nightly artifacts/* \
+            --prerelease \
+            --target "$GITHUB_SHA" \
+            --title "$TITLE" \
+            --notes "Automated build of $GITHUB_SHA from \`$GITHUB_REF_NAME\`. This is not a stable release and may contain bugs."
