@@ -70,3 +70,5 @@ Use the Caps Lock key to switch languages.
 </a>
 
 also available to download via release on github.
+
+Nightly builds of the latest `main` commit are published as a [prerelease](https://github.com/nut1414/language-bubble/releases/tag/nightly). These are untested and may be unstable.

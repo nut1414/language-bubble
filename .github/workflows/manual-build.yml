@@ -36,6 +36,8 @@ jobs:
       - name: Build release binary
         working-directory: LanguageBubble
         run: cargo build --release --locked --target ${{ env.BUILD_TARGET }}
+        env:
+          LANGUAGE_BUBBLE_BUILD_COMMIT: ${{ github.sha }}
 
       - name: Prepare artifact
         id: artifact

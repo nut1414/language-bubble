@@ -106,7 +106,7 @@ impl AppState {
             custom_colors: self.custom_colors,
             check_for_updates: self.settings.check_for_updates(),
             pending_update: self.pending_update.clone(),
-            app_version: env!("CARGO_PKG_VERSION"),
+            app_version: env!("APP_DISPLAY_VERSION"),
             is_msix: settings::is_msix_packaged(),
         }
     }
