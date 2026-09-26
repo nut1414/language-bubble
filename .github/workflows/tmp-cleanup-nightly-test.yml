@@ -1,0 +1,19 @@
+name: TEMP cleanup nightly-test
+
+on:
+  push:
+    branches:
+      - claude/zen-hypatia-bgelo4
+
+permissions:
+  contents: write
+
+jobs:
+  cleanup:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Delete nightly-test release and tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: gh release delete nightly-test --cleanup-tag --yes
