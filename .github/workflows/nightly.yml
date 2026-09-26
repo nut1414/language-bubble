@@ -1,7 +1,7 @@
 name: Nightly
 
 on:
-  push:  # TEMP: test run, revert before merge
+  push:  # TEMP: test run 2, revert before merge
     branches:
       - claude/zen-hypatia-bgelo4
   schedule:
@@ -17,7 +17,7 @@ permissions:
   contents: read
 
 env:
-  RELEASE_TAG: nightly-test  # TEMP: test run, revert before merge
+  RELEASE_TAG: nightly-test  # TEMP: test run 2, revert before merge
 
 concurrency:
   group: nightly
