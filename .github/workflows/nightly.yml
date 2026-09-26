@@ -131,12 +131,49 @@ jobs:
           TITLE: Nightly ${{ needs.check.outputs.date }} (${{ needs.check.outputs.short_sha }})
           NOTES: Automated build of ${{ github.sha }} from `main`. This is not a stable release and may contain bugs.
         run: |
-          if gh release view nightly > /dev/null 2>&1; then
-            # Replace assets first so the existing release stays usable if anything fails.
-            gh release upload nightly artifacts/* --clobber
-            gh api -X PATCH "repos/$GH_REPO/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true
-            gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
+          set -euo pipefail
+          api="repos/$GH_REPO"
+
+          # Only a confirmed "not found" may take the create path; other lookup errors abort.
+          if state=$(gh release view nightly --json isDraft --jq .isDraft 2> lookup.err); then
+            if [ "$state" = "true" ]; then
+              # Leftover draft from a failed first publish.
+              gh release delete nightly --yes
+              state=missing
+            fi
+          elif grep -q "release not found" lookup.err; then
+            state=missing
           else
-            gh api -X DELETE "repos/$GH_REPO/git/refs/tags/nightly" > /dev/null 2>&1 || true
-            gh release create nightly artifacts/* --prerelease --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+            cat lookup.err >&2
+            exit 1
           fi
+
+          if [ "$state" = "missing" ]; then
+            # Drop an orphaned tag, if any, so the release is created at this commit.
+            gh api -X DELETE "$api/git/refs/tags/nightly" > /dev/null 2>&1 || true
+            gh release create nightly artifacts/* --prerelease --target "$GITHUB_SHA" --title "$TITLE" --notes "$NOTES"
+            exit 0
+          fi
+
+          # Upload replacements under temporary names so the current assets stay downloadable.
+          mkdir staged
+          for f in artifacts/*; do cp "$f" "staged/$(basename "$f").new"; done
+          gh release upload nightly staged/* --clobber
+
+          # Swap each staged asset in for the old one.
+          assets=$(gh api "$api/releases/tags/nightly" --jq '.assets[] | "\(.id) \(.name)"')
+          for f in artifacts/*; do
+            name=$(basename "$f")
+            old_id=$(awk -v n="$name" '$2 == n { print $1 }' <<< "$assets")
+            new_id=$(awk -v n="$name.new" '$2 == n { print $1 }' <<< "$assets")
+            if [ -n "$old_id" ]; then
+              gh api -X DELETE "$api/releases/assets/$old_id"
+            fi
+            gh api -X PATCH "$api/releases/assets/$new_id" -f name="$name" > /dev/null
+          done
+
+          gh release edit nightly --prerelease --title "$TITLE" --notes "$NOTES"
+
+          # Move the tag last: the check job treats it as the published commit, so any
+          # failure above leaves it unmoved and the next run retries the publish.
+          gh api -X PATCH "$api/git/refs/tags/nightly" -f sha="$GITHUB_SHA" -F force=true > /dev/null
