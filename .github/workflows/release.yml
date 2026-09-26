@@ -20,9 +20,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          components: rustfmt, clippy
+          workspaces: LanguageBubble
+          save-if: false
 
       - name: Validate release tag
         env:
@@ -60,9 +64,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        working-directory: LanguageBubble
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          targets: ${{ matrix.target }}
+          workspaces: LanguageBubble
+          key: ${{ matrix.target }}
+          save-if: false
 
       - name: Build
         working-directory: LanguageBubble
@@ -83,8 +93,46 @@ jobs:
           name: ${{ matrix.artifact }}
           path: ${{ matrix.artifact }}.exe
 
-  release:
+  # Package the exact executables being released into the Store MSIX bundle.
+  package:
     needs: build
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: LanguageBubble-win-*
+          path: exes
+          merge-multiple: true
+
+      - name: Stage executables for packaging
+        shell: pwsh
+        run: |
+          $layout = @{
+            "LanguageBubble-win-x64.exe"   = "x86_64-pc-windows-msvc"
+            "LanguageBubble-win-arm64.exe" = "aarch64-pc-windows-msvc"
+          }
+          foreach ($name in $layout.Keys) {
+            $dir = "LanguageBubble/target/$($layout[$name])/release"
+            New-Item -ItemType Directory -Path $dir -Force | Out-Null
+            Copy-Item "exes/$name" "$dir/language-bubble.exe"
+          }
+
+      - name: Build MSIX packages and bundle
+        shell: pwsh
+        run: ./scripts/package-msix.ps1 -SkipBuild -OutputDirectory dist
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: LanguageBubble-msix
+          path: dist/*
+          if-no-files-found: error
+
+  release:
+    needs: [build, package]
     runs-on: ubuntu-latest
     permissions:
       contents: write

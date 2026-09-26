@@ -28,10 +28,15 @@ jobs:
         with:
           persist-credentials: false
 
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Install pinned Rust toolchain
+        working-directory: LanguageBubble
+        run: rustup toolchain install
+
+      - uses: Swatinem/rust-cache@v2
         with:
-          targets: ${{ env.BUILD_TARGET }}
+          workspaces: LanguageBubble
+          key: ${{ env.BUILD_TARGET }}
+          save-if: ${{ github.ref == 'refs/heads/main' }}
 
       - name: Build release binary
         working-directory: LanguageBubble

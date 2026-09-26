@@ -27,8 +27,6 @@ cargo clippy --locked --all-targets -- -D warnings
 cargo test --locked --all-targets
 Pop-Location
 
-.\scripts\package-msix.ps1
-
 git diff --check
 git add LanguageBubble/Cargo.toml `
     LanguageBubble/Cargo.lock `
@@ -38,24 +36,24 @@ git tag v0.5.0
 git push origin main v0.5.0
 ```
 
-Upload `release/LanguageBubble_0.5.0.0.msixbundle` manually in Partner
-Center. Use `patch` or `major` instead of `minor` when appropriate. The
-sections below explain prerequisites, options, version rules, and recovery.
+Pushing the tag runs the release workflow, which publishes the executables
+and MSIX packages. Download `LanguageBubble_0.5.0.0.msixbundle` from the
+GitHub release and upload it manually in Partner Center. Use `patch` or
+`major` instead of `minor` when appropriate. The sections below explain
+prerequisites, options, version rules, and recovery.
 
 ## One-time setup
 
 Install:
 
 1. Rust through `rustup`.
-2. The x64 and ARM64 Rust targets.
-3. Visual Studio or Visual Studio Build Tools with the C++ workload.
-4. A Windows 10 or Windows 11 SDK containing `makepri.exe` and
-   `makeappx.exe`.
+2. Visual Studio or Visual Studio Build Tools with the C++ workload.
+3. A Windows 10 or Windows 11 SDK containing `makepri.exe` and
+   `makeappx.exe` (only needed to package MSIX locally).
 
-```powershell
-rustup target add x86_64-pc-windows-msvc
-rustup target add aarch64-pc-windows-msvc
-```
+The Rust version, components, and the x64/ARM64 targets are pinned in
+`LanguageBubble/rust-toolchain.toml`; rustup installs them automatically the
+first time you run `cargo` in `LanguageBubble`, and CI uses the same file.
 
 The packaging script discovers Visual Studio and the newest compatible
 Windows SDK automatically. No certificate is required to create the Store
@@ -116,7 +114,9 @@ cargo test --locked --all-targets
 Pop-Location
 ```
 
-Build both architectures and create the MSIX packages and bundle:
+The release workflow builds the MSIX packages and bundle from the released
+executables, so local packaging is optional. To verify packaging locally,
+build both architectures and create the MSIX packages and bundle:
 
 ```powershell
 .\scripts\package-msix.ps1
@@ -182,6 +182,12 @@ style. Current Microsoft Store validation may require a nonzero first MSIX
 version component. If Partner Center rejects a `0.x.y.0` bundle, do not change
 only the manifest or tag: decide and document a new synchronized version before
 rebuilding.
+
+## Update the Rust toolchain
+
+CI and local builds use the version in `LanguageBubble/rust-toolchain.toml`.
+To upgrade, change `channel` to the new stable version in a pull request, fix
+any new Clippy or formatting findings, and merge once CI passes.
 
 ## Recover from a release mistake
 
